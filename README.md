@@ -34,6 +34,8 @@ LED 제어는 UI가 멈추지 않도록 별도 스레드에서 실행됩니다. 
 
 이 프로젝트는 Windows와 MinGW-w64 환경을 기준으로 합니다. `build.bat`는 기본적으로 다음 경로의 컴파일러를 찾습니다.
 
+빌드하기 전에 `LightCrafter4500_GUI_Source_Code_v3.1.0` 압축 파일을 이 프로젝트 폴더에서 압축 해제해야 합니다. 압축을 풀면 `GUI/` 폴더 안에 TI LightCrafter 4500 GUI 소스 코드와 DLPC350 API, HIDAPI 관련 파일이 준비되어야 합니다.
+
 ```bat
 C:\msys64\mingw64\bin\g++.exe
 ```
