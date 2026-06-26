@@ -2,29 +2,59 @@
 setlocal
 cd /d "%~dp0"
 
-set "MINGW=C:\msys64\mingw64\bin"
 set "BUILD_DIR=build"
 set "HIDAPI_OBJ=%BUILD_DIR%\hidapi.o"
-if not exist "%MINGW%\g++.exe" (
+
+if defined MINGW (
+    if not exist "%MINGW%\g++.exe" (
+        echo [WARN] MINGW is set, but g++.exe was not found:
+        echo        %MINGW%\g++.exe
+        set "MINGW="
+    )
+)
+
+if not defined MINGW (
+    for %%D in ("%MSYSTEM_PREFIX%\bin" "C:\msys64\ucrt64\bin" "C:\msys64\mingw64\bin" "C:\msys64\clang64\bin") do (
+        if not defined MINGW if exist "%%~D\g++.exe" set "MINGW=%%~D"
+    )
+)
+
+if not defined MINGW (
+    for %%G in (g++.exe) do set "GXX=%%~$PATH:G"
+    if defined GXX for %%D in ("%GXX%") do set "MINGW=%%~dpD"
+)
+
+if not defined MINGW (
     echo [ERROR] MinGW-w64 g++.exe was not found:
-    echo         %MINGW%\g++.exe
-    echo Install MSYS2 MinGW-w64 or edit MINGW in build.bat.
+    echo.
+    echo Checked:
+    echo   %%MINGW%% environment variable
+    echo   %%MSYSTEM_PREFIX%%\bin
+    echo   C:\msys64\ucrt64\bin
+    echo   C:\msys64\mingw64\bin
+    echo   C:\msys64\clang64\bin
+    echo   PATH
+    echo.
+    echo Install MSYS2 MinGW-w64, or run this after setting MINGW to the compiler bin folder:
+    echo   set MINGW=C:\msys64\ucrt64\bin
     exit /b 1
 )
+
+echo Using compiler: %MINGW%\g++.exe
 
 set "GUI_DIR="
 set "GUI_PARENT="
 
 if exist "GUI\dlpc350_api.cpp" if exist "GUI\hidapi-master\windows\hid.c" (
-    set "GUI_DIR=GUI"
-    set "GUI_PARENT=."
+    for %%D in ("GUI") do set "GUI_DIR=%%~fD"
+    set "GUI_PARENT=%CD%"
 )
 
 if not defined GUI_DIR (
-    for /d %%D in (*) do (
-        if not defined GUI_DIR if exist "%%D\GUI\dlpc350_api.cpp" if exist "%%D\GUI\hidapi-master\windows\hid.c" (
-            set "GUI_DIR=%%D\GUI"
-            set "GUI_PARENT=%%D"
+    for /d /r "%CD%" %%D in (GUI) do (
+        if not defined GUI_DIR if exist "%%D\dlpc350_api.cpp" if exist "%%D\hidapi-master\windows\hid.c" (
+            set "GUI_DIR=%%D"
+            for %%P in ("%%D\..") do set "GUI_PARENT=%%~fP"
         )
     )
 )
@@ -32,9 +62,8 @@ if not defined GUI_DIR (
 if not defined GUI_DIR (
     echo [ERROR] LightCrafter 4500 GUI source folder was not found.
     echo.
-    echo Expected one of:
-    echo   %CD%\GUI
-    echo   %CD%\^<extracted-folder^>\GUI
+    echo Expected a GUI folder somewhere under:
+    echo   %CD%
     echo.
     echo Extract LightCrafter4500_GUI_Source_Code_v3.1.0 into this project folder
     echo so that dlpc350_api.cpp and hidapi-master\windows\hid.c are under a GUI folder.
