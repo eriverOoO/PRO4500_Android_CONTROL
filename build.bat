@@ -3,6 +3,8 @@ setlocal
 cd /d "%~dp0"
 
 set "MINGW=C:\msys64\mingw64\bin"
+set "BUILD_DIR=build"
+set "HIDAPI_OBJ=%BUILD_DIR%\hidapi.o"
 if not exist "%MINGW%\g++.exe" (
     echo [ERROR] MinGW-w64 g++.exe was not found:
     echo         %MINGW%\g++.exe
@@ -41,14 +43,19 @@ if not defined GUI_DIR (
 
 echo Using GUI source: %GUI_DIR%
 
-if not exist build mkdir build
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [1/2] Compiling HIDAPI...
 "%MINGW%\gcc.exe" -std=gnu11 -O2 -Wall ^
     -I"%GUI_DIR%\hidapi-master\hidapi" ^
     -c "%GUI_DIR%\hidapi-master\windows\hid.c" ^
-    -o "build\hidapi.o"
+    -o "%HIDAPI_OBJ%"
 if errorlevel 1 goto :fail
+if not exist "%HIDAPI_OBJ%" (
+    echo [ERROR] HIDAPI object file was not created:
+    echo         %CD%\%HIDAPI_OBJ%
+    goto :fail
+)
 
 echo [2/2] Building PRO4500.exe...
 "%MINGW%\g++.exe" -std=c++17 -O2 -Wall -Wextra -municode -mwindows ^
@@ -57,7 +64,7 @@ echo [2/2] Building PRO4500.exe...
     "dlpc350_usb_standalone.cpp" ^
     "%GUI_DIR%\dlpc350_api.cpp" ^
     "%GUI_DIR%\dlpc350_common.cpp" ^
-    "build\hidapi.o" ^
+    "%HIDAPI_OBJ%" ^
     -o "PRO4500.exe" ^
     -lsetupapi -lhid -lgdiplus -lcomctl32 -lole32 -luuid
 if errorlevel 1 goto :fail

@@ -48,7 +48,7 @@ MSYS2 MinGW-w64가 다른 위치에 설치되어 있다면 `build.bat`의 `MINGW
 build.bat
 ```
 
-빌드가 성공하면 루트 폴더에 `PRO4500.exe`가 생성되고, 실행에 필요한 MinGW 런타임 DLL도 함께 복사됩니다.
+빌드 중 `GUI/hidapi-master/windows/hid.c`에서 `build/hidapi.o`가 자동 생성됩니다. `hidapi.o`는 빌드 산출물이므로 GitHub에 올리지 않아도 됩니다. 빌드가 성공하면 루트 폴더에 `PRO4500.exe`가 생성되고, 실행에 필요한 MinGW 런타임 DLL도 함께 복사됩니다.
 
 ## 실행 방법
 
