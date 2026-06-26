@@ -46,7 +46,7 @@ echo Using GUI source: %GUI_DIR%
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [1/2] Compiling HIDAPI...
-"%MINGW%\gcc.exe" -std=gnu11 -O2 -Wall ^
+"%MINGW%\gcc.exe" -std=gnu11 -O2 -Wall -Wno-stringop-truncation ^
     -I"%GUI_DIR%\hidapi-master\hidapi" ^
     -c "%GUI_DIR%\hidapi-master\windows\hid.c" ^
     -o "%HIDAPI_OBJ%"
