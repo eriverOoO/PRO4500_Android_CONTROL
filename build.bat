@@ -10,22 +10,53 @@ if not exist "%MINGW%\g++.exe" (
     exit /b 1
 )
 
+set "GUI_DIR="
+set "GUI_PARENT="
+
+if exist "GUI\dlpc350_api.cpp" if exist "GUI\hidapi-master\windows\hid.c" (
+    set "GUI_DIR=GUI"
+    set "GUI_PARENT=."
+)
+
+if not defined GUI_DIR (
+    for /d %%D in (*) do (
+        if not defined GUI_DIR if exist "%%D\GUI\dlpc350_api.cpp" if exist "%%D\GUI\hidapi-master\windows\hid.c" (
+            set "GUI_DIR=%%D\GUI"
+            set "GUI_PARENT=%%D"
+        )
+    )
+)
+
+if not defined GUI_DIR (
+    echo [ERROR] LightCrafter 4500 GUI source folder was not found.
+    echo.
+    echo Expected one of:
+    echo   %CD%\GUI
+    echo   %CD%\^<extracted-folder^>\GUI
+    echo.
+    echo Extract LightCrafter4500_GUI_Source_Code_v3.1.0 into this project folder
+    echo so that dlpc350_api.cpp and hidapi-master\windows\hid.c are under a GUI folder.
+    exit /b 1
+)
+
+echo Using GUI source: %GUI_DIR%
+
 if not exist build mkdir build
 
 echo [1/2] Compiling HIDAPI...
 "%MINGW%\gcc.exe" -std=gnu11 -O2 -Wall ^
-    -I"GUI\hidapi-master\hidapi" ^
-    -c "GUI\hidapi-master\windows\hid.c" ^
+    -I"%GUI_DIR%\hidapi-master\hidapi" ^
+    -c "%GUI_DIR%\hidapi-master\windows\hid.c" ^
     -o "build\hidapi.o"
 if errorlevel 1 goto :fail
 
 echo [2/2] Building PRO4500.exe...
 "%MINGW%\g++.exe" -std=c++17 -O2 -Wall -Wextra -municode -mwindows ^
-    -I"GUI" -I"GUI\hidapi-master\hidapi" ^
+    -I"%GUI_PARENT%" -I"%GUI_DIR%" -I"%GUI_DIR%\hidapi-master\hidapi" ^
     "PRO4500.cpp" ^
     "dlpc350_usb_standalone.cpp" ^
-    "GUI\dlpc350_api.cpp" ^
-    "GUI\dlpc350_common.cpp" ^
+    "%GUI_DIR%\dlpc350_api.cpp" ^
+    "%GUI_DIR%\dlpc350_common.cpp" ^
     "build\hidapi.o" ^
     -o "PRO4500.exe" ^
     -lsetupapi -lhid -lgdiplus -lcomctl32 -lole32 -luuid
