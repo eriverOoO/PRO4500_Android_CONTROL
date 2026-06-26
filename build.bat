@@ -41,6 +41,7 @@ if not defined MINGW (
 )
 
 echo Using compiler: %MINGW%\g++.exe
+set "PATH=%MINGW%;%PATH%"
 
 set "GUI_DIR="
 set "GUI_PARENT="
