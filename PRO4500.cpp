@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -53,6 +54,8 @@ constexpr int IDC_DARK        = 1009;
 constexpr int IDC_REPEAT      = 1010;
 constexpr int IDC_DISPLAY     = 1011;
 constexpr int IDC_STATUS      = 1012;
+constexpr int IDC_PROJECT_ANGLES = 1013;
+constexpr int IDC_ROTATE_CMD  = 1014;
 
 HWND g_mainWindow = nullptr;
 HWND g_slider = nullptr;
@@ -73,6 +76,9 @@ struct ProjectionState {
     int darkMs = 150;
     int repeat = 1;
     int displayIndex = 1;
+    bool angleSequence = false;
+    std::vector<int> angles;
+    std::wstring rotationCommand;
 };
 
 struct ProjectionWindowData {
@@ -171,6 +177,18 @@ std::vector<std::wstring> image_files(const std::wstring& folder) {
     return result;
 }
 
+std::wstring replace_all(std::wstring text, const std::wstring& from, const std::wstring& to) {
+    if (from.empty()) {
+        return text;
+    }
+    size_t pos = 0;
+    while ((pos = text.find(from, pos)) != std::wstring::npos) {
+        text.replace(pos, from.length(), to);
+        pos += to.length();
+    }
+    return text;
+}
+
 void load_current_image(ProjectionWindowData* data) {
     data->image.reset();
     if (!data->dark && data->imageIndex < data->state.images.size()) {
@@ -250,16 +268,7 @@ LRESULT CALLBACK projection_proc(HWND window, UINT message, WPARAM wParam, LPARA
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-void projection_thread(ProjectionState state) {
-    const auto displayList = monitors();
-    if (displayList.empty()) {
-        g_projectionRunning = false;
-        PostMessageW(g_mainWindow, WM_APP + 1, 0, 0);
-        return;
-    }
-    const int index = std::clamp(state.displayIndex, 0, static_cast<int>(displayList.size()) - 1);
-    const RECT rect = displayList[static_cast<size_t>(index)].rect;
-
+void register_projection_window_class() {
     WNDCLASSW wc{};
     wc.lpfnWndProc = projection_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -267,12 +276,15 @@ void projection_thread(ProjectionState state) {
     wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = L"PRO4500ProjectionWindow";
     RegisterClassW(&wc);
+}
 
-    ProjectionWindowData data{std::move(state)};
+bool run_projection_window(const ProjectionState& state, const RECT& rect, const std::wstring& title) {
+    ProjectionWindowData data{};
+    data.state = state;
     HWND window = CreateWindowExW(
-        WS_EX_TOPMOST, wc.lpszClassName, L"PRO4500 Projection", WS_POPUP,
+        WS_EX_TOPMOST, L"PRO4500ProjectionWindow", title.c_str(), WS_POPUP,
         rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
-        nullptr, nullptr, wc.hInstance, &data);
+        nullptr, nullptr, GetModuleHandleW(nullptr), &data);
 
     if (window) {
         ShowWindow(window, SW_SHOW);
@@ -284,11 +296,78 @@ void projection_thread(ProjectionState state) {
         }
     }
 
+    return !g_stopProjection.load();
+}
+
+bool run_rotation_step(const ProjectionState& state, int previousAngle, int angle) {
+    if (state.rotationCommand.empty()) {
+        const std::wstring message =
+            L"Rotate disk to " + std::to_wstring(angle) +
+            L" degrees, then press OK to project the next sequence.";
+        const int result = MessageBoxW(
+            g_mainWindow, message.c_str(), L"PRO4500 0/180 Sequence",
+            MB_OKCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
+        return result == IDOK;
+    }
+
+    std::wstring command = state.rotationCommand;
+    command = replace_all(command, L"{angle}", std::to_wstring(angle));
+    command = replace_all(command, L"{previous_angle}", std::to_wstring(previousAngle));
+
+    const int result = _wsystem(command.c_str());
+    if (result == 0) {
+        return true;
+    }
+
+    const std::wstring message =
+        L"Rotation command failed with exit code " + std::to_wstring(result) +
+        L". Continue projection anyway?";
+    return MessageBoxW(
+        g_mainWindow, message.c_str(), L"PRO4500 Rotation Command",
+        MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST) == IDOK;
+}
+
+void projection_thread(ProjectionState state) {
+    const auto displayList = monitors();
+    if (displayList.empty()) {
+        g_projectionRunning = false;
+        PostMessageW(g_mainWindow, WM_APP + 1, 0, 0);
+        return;
+    }
+    const int index = std::clamp(state.displayIndex, 0, static_cast<int>(displayList.size()) - 1);
+    const RECT rect = displayList[static_cast<size_t>(index)].rect;
+
+    register_projection_window_class();
+
+    if (state.angleSequence) {
+        if (state.angles.empty()) {
+            state.angles = {0, 180};
+        }
+
+        for (size_t i = 0; i < state.angles.size() && !g_stopProjection.load(); ++i) {
+            const int angle = state.angles[i];
+            if (i > 0 && !run_rotation_step(state, state.angles[i - 1], angle)) {
+                g_stopProjection = true;
+                break;
+            }
+
+            ProjectionState angleState = state;
+            angleState.angleSequence = false;
+            const std::wstring title =
+                L"PRO4500 Projection - angle " + std::to_wstring(angle);
+            if (!run_projection_window(angleState, rect, title)) {
+                break;
+            }
+        }
+    } else {
+        run_projection_window(state, rect, L"PRO4500 Projection");
+    }
+
     g_projectionRunning = false;
     PostMessageW(g_mainWindow, WM_APP + 1, 0, 0);
 }
 
-void start_projection(HWND window) {
+void start_projection(HWND window, bool angleSequence) {
     if (g_projectionRunning.exchange(true)) {
         set_status(L"이미 이미지 출력 중입니다.");
         return;
@@ -300,6 +379,12 @@ void start_projection(HWND window) {
     state.darkMs = window_int(GetDlgItem(window, IDC_DARK), 150, 0);
     state.repeat = window_int(GetDlgItem(window, IDC_REPEAT), 1, 1);
     state.displayIndex = window_int(GetDlgItem(window, IDC_DISPLAY), 1, 0);
+    state.angleSequence = angleSequence;
+    state.rotationCommand = window_text(GetDlgItem(window, IDC_ROTATE_CMD));
+    if (angleSequence) {
+        state.angles = {0, 180};
+        state.repeat = 1;
+    }
 
     if (state.images.empty()) {
         g_projectionRunning = false;
@@ -344,7 +429,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
                             250, 55, 145, 32, IDC_LED_OFF));
 
         setFont(add_control(window, L"STATIC", L"Pattern folder", 0, 18, 108, 95, 24));
-        setFont(add_control(window, L"EDIT", L".\\patterns", WS_BORDER | ES_AUTOHSCROLL,
+        setFont(add_control(window, L"EDIT", L".\\generated_patterns", WS_BORDER | ES_AUTOHSCROLL,
                             115, 105, 335, 25, IDC_FOLDER));
 
         setFont(add_control(window, L"STATIC", L"Exposure (ms)", 0, 18, 145, 95, 24));
@@ -365,9 +450,15 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         setFont(add_control(window, L"BUTTON", L"Stop", BS_PUSHBUTTON,
                             335, 176, 115, 32, IDC_STOP));
 
+        setFont(add_control(window, L"STATIC", L"Rotation cmd", 0, 18, 220, 95, 24));
+        setFont(add_control(window, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
+                            115, 217, 200, 25, IDC_ROTATE_CMD));
+        setFont(add_control(window, L"BUTTON", L"Project 0/180", BS_PUSHBUTTON,
+                            325, 214, 125, 32, IDC_PROJECT_ANGLES));
+
         g_statusLabel = setFont(add_control(window, L"STATIC",
             L"LightCrafter 4500을 USB로 연결한 뒤 사용하세요.", SS_LEFT,
-            18, 225, 432, 38, IDC_STATUS));
+            18, 260, 432, 38, IDC_STATUS));
         return 0;
     }
     case WM_HSCROLL:
@@ -396,7 +487,10 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
             return 0;
         }
         case IDC_PROJECT:
-            start_projection(window);
+            start_projection(window, false);
+            return 0;
+        case IDC_PROJECT_ANGLES:
+            start_projection(window, true);
             return 0;
         case IDC_STOP:
             g_stopProjection = true;
@@ -438,7 +532,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_mainWindow = CreateWindowExW(
         0, wc.lpszClassName, L"PRO4500 Light Engine Control",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 490, 310,
+        CW_USEDEFAULT, CW_USEDEFAULT, 490, 350,
         nullptr, nullptr, instance, nullptr);
 
     if (!g_mainWindow) {

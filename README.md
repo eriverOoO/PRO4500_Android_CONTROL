@@ -1,77 +1,204 @@
-# PRO4500 Light Engine Control
+# PRO4500 Structured-Light Phone Capture System
 
-PRO4500은 Windows에서 실행되는 간단한 Win32 GUI 프로그램입니다. TI DLP LightCrafter 4500 계열 장비를 USB HID로 연결해 Blue LED 밝기를 제어하고, 지정한 폴더의 이미지 파일을 선택한 디스플레이에 전체 화면 패턴으로 순차 투사합니다.
+이 저장소는 Windows PC와 Galaxy S23 스마트폰을 사용해 구조광 패턴 촬영을 자동화하는 실험용 제어 코드입니다.
 
-## 주요 기능
+현재 구성은 두 축으로 나뉩니다.
 
-- Blue LED 밝기 조절: 슬라이더 값 0~255를 DLPC350 LED current 명령으로 전송합니다.
-- LED 끄기: Blue LED 값을 0으로 설정해 출력을 중지합니다.
-- 이미지 패턴 투사: 폴더 안의 이미지 파일을 정렬된 순서로 표시합니다.
-- 노출/암전 시간 설정: 각 이미지 표시 시간과 이미지 사이의 검은 화면 시간을 ms 단위로 지정합니다.
-- 반복 횟수 설정: 이미지 시퀀스를 원하는 횟수만큼 반복합니다.
-- 디스플레이 선택: 다중 모니터 환경에서 투사할 화면 인덱스를 지정합니다.
-- ESC 또는 Stop 버튼으로 투사 중지.
+- `PRO4500.exe`: 기존 Win32 프로그램. PRO4500/LightCrafter 계열 장치의 Blue LED 전류 제어와 폴더 이미지 전체화면 투사를 담당합니다.
+- `structured_light_pc_controller.py`: 새 PC 마스터 컨트롤러. 패턴을 PC 확장 디스플레이에 순차 표시하고, Android 앱에 Wi-Fi 촬영 명령을 보내고, 업로드된 이미지를 로그와 함께 저장합니다.
 
-## 파일 구성
+완전한 패턴-사진 번호 동기화가 필요하면 `structured_light_pc_controller.py`가 패턴 표시까지 직접 담당해야 합니다. 기존 `PRO4500.exe`를 독립 실행해서 타이머로 패턴을 넘기면 PC 컨트롤러가 "현재 어떤 패턴이 실제 표시 중인지"를 ACK로 받을 수 없어서 사진 번호가 꼬일 수 있습니다.
 
-- `PRO4500.cpp`: 메인 Win32 GUI, LED 제어 버튼 처리, 이미지 투사 창, 타이머 기반 패턴 전환 로직을 포함합니다.
-- `dlpc350_usb_standalone.cpp`: HIDAPI를 사용해 LightCrafter 4500 USB 장치를 열고, 읽기/쓰기/닫기 동작을 수행합니다.
-- `projector_usb_diagnostics.h`: USB 연결 실패 원인을 UI에 표시하기 위한 마지막 오류 메시지 인터페이스입니다.
-- `GUI/`: TI LightCrafter 4500 GUI에서 가져온 DLPC350 API, 공통 코드, HIDAPI 소스가 들어 있습니다.
-- `build.bat`: MinGW-w64로 실행 파일을 빌드하는 Windows 배치 스크립트입니다.
+## 전체 구조
 
-## 동작 구조
+1. PC가 FastAPI WebSocket/HTTP 서버를 시작합니다.
+2. Android 앱 `StructuredLightPhoneCamera`가 `ws://<PC_IP>:8765/ws`로 연결합니다.
+3. PC가 프로젝터가 연결된 Windows 확장 디스플레이에 패턴 이미지를 표시합니다.
+4. PC가 `settle-ms`만큼 기다립니다.
+5. PC가 Android 앱에 `capture` 명령을 보냅니다.
+6. Android 앱이 CameraX로 후면 카메라 사진을 촬영합니다.
+7. Android 앱이 `/upload`로 JPEG를 multipart 업로드합니다.
+8. Android 앱이 WebSocket으로 `capture_done`을 보냅니다.
+9. PC는 업로드와 `capture_done` 둘 다 확인한 뒤 다음 패턴으로 넘어갑니다.
+10. 종료 후 `scan_log.json`과 `scan_log.csv`를 저장합니다.
 
-프로그램 시작 시 `wWinMain`에서 공용 컨트롤과 GDI+를 초기화하고 메인 제어 창을 생성합니다. 메인 창에는 Blue LED 슬라이더, LED 적용/끄기 버튼, 패턴 폴더, 노출 시간, 암전 시간, 반복 횟수, 디스플레이 인덱스, 투사/중지 버튼이 배치됩니다.
+## 필요한 장비
 
-LED 제어는 UI가 멈추지 않도록 별도 스레드에서 실행됩니다. `set_blue_led()`는 USB mutex를 잡은 뒤 `DLPC350_USB_Init()`, `DLPC350_USB_Open()`으로 장비에 연결하고, `DLPC350_SetLedEnables()`와 `DLPC350_SetLedCurrents()`를 호출한 뒤 연결을 닫습니다. 동시에 여러 USB 명령이 겹치지 않도록 `g_usbBusy`와 `g_usbMutex`를 사용합니다.
+- Windows PC
+- Galaxy S23 또는 CameraX가 동작하는 Android 폰
+- PRO4500 또는 HDMI 프로젝터
+- PC와 폰이 같은 Wi-Fi/LAN에 연결된 공유기
+- 구조광 촬영 대상, 고정 지그, 가능하면 주변광 차단
 
-이미지 투사는 `start_projection()`에서 시작됩니다. 지정 폴더에서 `bmp`, `png`, `jpg`, `jpeg`, `gif`, `tif`, `tiff` 파일을 찾아 파일명 기준으로 정렬한 뒤, 별도 투사 스레드를 실행합니다. 투사 스레드는 선택된 모니터 영역에 최상위 전체 화면 팝업 창을 만들고, `WM_TIMER` 이벤트마다 이미지 표시 상태와 암전 상태를 번갈아 전환합니다.
+## 네트워크 설정
 
-이미지 렌더링은 GDI+ `Image`와 `Graphics`를 사용합니다. 이미지는 화면 비율을 유지한 채 창 안에 맞게 확대/축소되며, 보간 모드는 `InterpolationModeNearestNeighbor`로 설정되어 패턴 이미지의 픽셀 경계가 흐려지는 것을 줄입니다.
+- PC와 폰은 같은 LAN에 있어야 합니다.
+- Windows 방화벽에서 TCP `8765` 포트를 허용해야 합니다.
+- PC IP는 `ipconfig`에서 확인합니다. 예: `192.168.0.12`
+- Android 앱에는 `ws://192.168.0.12:8765/ws` 형식으로 입력합니다.
 
-## 빌드 방법
+## PC Python 환경
 
-이 프로젝트는 Windows와 MinGW-w64 환경을 기준으로 합니다. `build.bat`는 기본적으로 다음 경로의 컴파일러를 찾습니다.
+Python 3.10 이상을 권장합니다. 현재 스크립트는 Python 3.12 기준으로 작성했지만, 3.10+에서도 동작하도록 제한했습니다.
 
-빌드하기 전에 `LightCrafter4500_GUI_Source_Code_v3.1.0` 압축 파일을 이 프로젝트 폴더에서 압축 해제해야 합니다. `build.bat`는 루트의 `GUI/` 폴더 또는 `LightCrafter4500_GUI_Source_Code_v3.1.0/GUI`처럼 한 단계 아래에 있는 `GUI/` 폴더를 자동으로 찾습니다. 해당 `GUI/` 폴더 안에는 TI LightCrafter 4500 GUI 소스 코드와 DLPC350 API, HIDAPI 관련 파일이 있어야 합니다.
+이 PC에서 바로 준비하려면:
 
-```bat
-C:\msys64\mingw64\bin\g++.exe
+```powershell
+powershell -ExecutionPolicy Bypass -File .\prepare_pc_python_env.ps1
 ```
 
-MSYS2 MinGW-w64가 다른 위치에 설치되어 있다면 `build.bat`의 `MINGW` 값을 수정하세요.
+성공 후 PC 컨트롤러는 다음 Python으로 실행합니다.
 
-빌드:
-
-```bat
-build.bat
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1
 ```
 
-빌드 중 `GUI/hidapi-master/windows/hid.c`에서 `build/hidapi.o`가 자동 생성됩니다. `hidapi.o`는 빌드 산출물이므로 GitHub에 올리지 않아도 됩니다. 빌드가 성공하면 루트 폴더에 `PRO4500.exe`가 생성되고, 실행에 필요한 MinGW 런타임 DLL도 함께 복사됩니다.
+수동으로 준비하려면:
 
-## 실행 방법
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install -r requirements.txt
+```
 
-1. LightCrafter 4500 장비를 USB로 PC에 연결합니다.
-2. `PRO4500.exe`를 실행합니다.
-3. Blue LED 슬라이더 값을 조정한 뒤 `Apply LED`를 누릅니다.
-4. 패턴 이미지가 들어 있는 폴더 경로를 입력합니다. 기본값은 `.\patterns`입니다.
-5. `Exposure (ms)`, `Dark (ms)`, `Repeat`, `Display index`를 설정합니다.
-6. `Project images`를 눌러 이미지 시퀀스를 전체 화면으로 투사합니다.
-7. 중지하려면 `Stop` 버튼을 누르거나 투사 화면에서 `ESC`를 누릅니다.
+더미 패턴을 만들려면:
 
-## USB 연결 참고
+```powershell
+python tools\generate_dummy_patterns.py --output example_patterns --count 8 --width 1280 --height 800
+```
 
-프로그램은 TI 장비 VID `0x0451`과 LightCrafter 4500 PID `0x6401`을 기준으로 HID 장치를 찾습니다. 장치가 감지되지 않거나 열리지 않으면 다음을 확인하세요.
+기존 구조광 패턴을 쓰려면 `generated_patterns` 또는 `patterns\fpp_14`를 지정합니다.
 
-- 장비 전원과 USB 데이터 케이블 연결 상태
-- Windows 장치 관리자에서 HID 장치 인식 상태
-- TI GUI 등 다른 프로그램이 장치를 사용 중인지 여부
-- 관리자 권한 실행 필요 여부
+## PC 실행 예
 
-## 주의 사항
+터미널 명령 대신 GUI를 쓰려면 루트의 실행 파일을 더블클릭합니다.
 
-- 이 프로그램은 Windows 전용입니다.
-- 이미지 투사 기능은 실제 프로젝터 제어 명령으로 패턴을 전송하는 방식이 아니라, 선택한 디스플레이에 전체 화면 창을 띄워 이미지를 표시하는 방식입니다.
-- `Display index`는 Windows에서 열거된 모니터 순서를 사용합니다. 기본값 `1`은 보통 두 번째 디스플레이를 의미합니다.
-- 소스의 일부 한글 상태 메시지는 현재 파일 인코딩 문제로 깨져 보일 수 있습니다. UI 문구를 수정할 때는 UTF-8 인코딩을 유지하는 것이 좋습니다.
+```text
+StructuredLightControlPanel.exe
+```
+
+GUI에서 패턴 폴더, 출력 폴더, 모니터 번호, 노출값을 설정하고 `Start Scan`을 누르면 됩니다. Android 앱에는 GUI 상단에 표시되는 `Phone URL`을 입력합니다. `Patterns` 폴더 안의 지원 이미지 파일은 전부 순서대로 실행되므로 패턴 개수는 폴더 구성으로 조절합니다. `Angles`에 `0,180`처럼 여러 각도를 입력하면 한 각도 시퀀스가 끝난 뒤 `Next Angle` 버튼이 활성화됩니다. PCB를 회전한 다음 `Next Angle`을 누르면 다음 각도 패턴 시퀀스가 이어집니다. `Blue LED` 슬라이더, `Apply LED`, `LED Off`로 PRO4500/LightCrafter 4500의 Blue LED 세기를 조절할 수 있습니다. 스크립트 런처가 더 편하면 `StructuredLightControlPanel.vbs` 또는 `run_control_panel.bat`도 사용할 수 있습니다.
+
+GUI 실행 파일을 다시 빌드하려면:
+
+```text
+build_native_control_panel.bat
+```
+
+```powershell
+python structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --settle-ms 300 --exposure-us 10000 --iso 100 --manual true
+```
+
+두 각도 촬영을 수동 회전으로 진행하려면:
+
+```powershell
+python structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --angles 0,180 --settle-ms 300
+```
+
+GUI에서는 두 번째 각도부터 `Next Angle` 버튼으로 진행합니다. 터미널에서 직접 실행하면 콘솔 Enter 대기 방식을 사용할 수 있고, 모터 제어 명령이 있으면 다음처럼 붙일 수 있습니다.
+
+```powershell
+python structured_light_pc_controller.py --angles 0,180 --rotation-command "python tools\rotate_stage.py --angle {angle}"
+```
+
+## Android 앱 빌드
+
+Android Studio에서 다음 폴더를 엽니다.
+
+```text
+android/StructuredLightPhoneCamera
+```
+
+이 저장소에는 Gradle Wrapper JAR를 생성해 넣지 않았습니다. Android Studio에서 프로젝트를 열어 Gradle Sync를 실행하거나, 로컬 Gradle이 있다면 `gradle -p android/StructuredLightPhoneCamera :app:assembleDebug`로 빌드합니다.
+
+빌드 후 Galaxy S23에 설치합니다. 앱 실행 시 카메라 권한을 허용하고 PC WebSocket URL을 입력한 뒤 `Connect`를 누릅니다.
+
+앱은 CameraX Preview + ImageCapture를 사용합니다. 수동 노출/ISO/초점은 Camera2Interop으로 적용을 시도합니다. 기기/렌즈에서 수동 설정을 지원하지 않으면 앱 로그에 표시하고 자동 모드로 촬영합니다.
+
+첫 버전은 JPEG 촬영/업로드만 구현했습니다. DNG/RAW 저장은 Camera2 기반 확장 작업으로 남겨두었습니다.
+
+## APK만 만들어서 폰으로 보내기
+
+이 PC에 Android Studio가 없어도, 루트에서 다음 PowerShell 스크립트를 실행하면 프로젝트 폴더 안의 `.toolchains`에 JDK/Gradle/Android SDK를 내려받고 APK까지 빌드합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\prepare_android_build_toolchain.ps1
+```
+
+이미 도구가 준비되어 있으면 다음 배치 파일만 실행해도 됩니다.
+
+```powershell
+.\build_phone_apk.bat
+```
+
+성공하면 아래 APK가 생성됩니다.
+
+```text
+dist\StructuredLightPhoneCamera-debug.apk
+```
+
+이 APK를 Galaxy S23으로 복사해서 열면 설치할 수 있습니다. 폰에서 "알 수 없는 앱 설치 허용"과 카메라 권한 허용이 필요할 수 있습니다.
+
+USB 디버깅과 `adb`가 준비되어 있으면 다음 명령으로 바로 설치할 수도 있습니다.
+
+```powershell
+.\install_phone_apk_adb.bat
+```
+
+## 스캔 절차
+
+1. PC와 폰을 같은 Wi-Fi에 연결합니다.
+2. 프로젝터를 Windows 확장 디스플레이로 설정합니다.
+3. PC에서 Python 컨트롤러를 실행합니다.
+4. Android 앱에서 PC WebSocket URL을 입력하고 연결합니다.
+5. PC 컨트롤러가 패턴을 표시하고 폰 촬영/업로드를 반복합니다.
+6. 완료 후 `captures/<scan_id>/`에서 이미지를 확인합니다.
+7. `scan_log.json`과 `scan_log.csv`에서 패턴 파일명, `pattern_id`, `capture_id`, 업로드 파일명을 확인합니다.
+
+## 출력 구조
+
+```text
+captures/
+  scan_YYYYMMDD_HHMMSS/
+    scan_YYYYMMDD_HHMMSS_angle_000_pattern_000_capture_000.jpg
+    scan_YYYYMMDD_HHMMSS_angle_000_pattern_001_capture_001.jpg
+    scan_log.json
+    scan_log.csv
+```
+
+## 간단 테스트
+
+1. `python tools\generate_dummy_patterns.py --output example_patterns --count 4`
+2. `python structured_light_pc_controller.py --patterns example_patterns --output captures --windowed --monitor 0`
+3. Android 앱에서 `ws://<PC_IP>:8765/ws`로 연결
+4. 4장의 패턴마다 사진이 촬영되고 PC로 업로드되는지 확인
+5. `scan_log.csv`에서 `pattern_000.png`와 `capture_000.jpg`가 매칭되는지 확인
+6. Wi-Fi를 잠시 끊어 timeout/retry 로그가 남는지 확인
+
+## 문제 해결
+
+- 폰이 PC에 연결 안 됨: PC IP, 같은 LAN 여부, Windows 방화벽의 8765 포트 허용을 확인합니다.
+- 업로드 실패: Android 앱의 `upload_url` 로그와 PC 콘솔의 `/upload` 수신 로그를 확인합니다.
+- 카메라 권한 실패: Android 설정에서 앱 카메라 권한을 허용합니다.
+- 이미지가 어둡거나 밝음: `--exposure-us`, `--iso`, 프로젝터 밝기를 조정합니다.
+- 패턴과 사진 번호가 안 맞음: `PRO4500.exe` 독립 투사 대신 `structured_light_pc_controller.py`의 패턴 표시 모드를 사용합니다.
+- 프로젝터 화면이 다른 모니터에 뜸: `--monitor`, `--windowed`, `--window-x`, `--window-y` 옵션을 조정합니다.
+
+## 구조광 촬영 주의사항
+
+- 가능하면 자동노출, 자동초점, 자동화이트밸런스를 끕니다.
+- 카메라, 프로젝터, 대상은 촬영 중 움직이지 않게 고정합니다.
+- 프로젝터 밝기와 주변 조명을 고정합니다.
+- 패턴 표시 직후에는 `--settle-ms`로 안정화 시간을 둡니다.
+- HDR, Night mode, Beauty/filter, flash는 사용하지 않습니다.
+
+## Height Map / Point Cloud
+
+이 커밋은 원격 촬영과 이미지 수집 자동화까지 구현합니다. 실제 height map과 point cloud 산출에는 다음 단계가 추가로 필요합니다.
+
+- Gray-code/PSP 디코딩
+- 카메라-프로젝터 calibration
+- 기준 평면 보정
+- 삼각측량 및 `.ply`/height image 출력
+
+캡처 결과와 로그는 이 후처리 파이프라인의 입력으로 사용할 수 있게 `scan_id`, `pattern_id`, `capture_id`, `angle_deg`를 일관되게 남깁니다.

@@ -1,0 +1,51 @@
+{
+  "run_id": "projection_20260629_112706",
+  "created_at": "2026-06-29T11:27:06",
+  "pattern_dir": "C:\\Users\\shang\\OneDrive\\바탕 화면\\PRO4500_Control_System\\generated_patterns",
+  "pattern_count": 14,
+  "patterns": [
+    "00_White.bmp",
+    "01_Black.bmp",
+    "02_Gray0.bmp",
+    "03_Gray1.bmp",
+    "04_Gray2.bmp",
+    "05_Gray3.bmp",
+    "06_Gray4.bmp",
+    "07_Gray5.bmp",
+    "08_Gray6.bmp",
+    "09_Gray7.bmp",
+    "10_Sine_000.bmp",
+    "11_Sine_090.bmp",
+    "12_Sine_180.bmp",
+    "13_Sine_270.bmp"
+  ],
+  "angles_deg": [
+    0,
+    180
+  ],
+  "pattern_ms": 700,
+  "dark_ms": 0,
+  "project_command": "project_sequence --dir {pattern_dir} --count {pattern_count}",
+  "rotation_command": "rotate_disk --angle {angle}",
+  "events": [
+    {
+      "name": "project",
+      "command": "project_sequence --dir C:\\Users\\shang\\OneDrive\\바탕 화면\\PRO4500_Control_System\\generated_patterns --count 14",
+      "dry_run": true,
+      "angle_deg": 0
+    },
+    {
+      "name": "rotation",
+      "command": "rotate_disk --angle 180",
+      "dry_run": true,
+      "angle_deg": 180
+    },
+    {
+      "name": "project",
+      "command": "project_sequence --dir C:\\Users\\shang\\OneDrive\\바탕 화면\\PRO4500_Control_System\\generated_patterns --count 14",
+      "dry_run": true,
+      "angle_deg": 180
+    }
+  ],
+  "projected_patterns": []
+}
