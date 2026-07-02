@@ -1,161 +1,217 @@
 # PRO4500 Structured-Light Phone Capture System
 
-이 저장소는 Windows PC와 Galaxy S23 스마트폰을 사용해 구조광 패턴 촬영을 자동화하는 실험용 제어 코드입니다.
+Windows PC에서 PRO4500/LightCrafter 4500 계열 프로젝터 패턴을 표시하고,
+Android 휴대폰 카메라로 각 패턴 이미지를 촬영해 PC로 업로드하는 구조광 캡처 시스템입니다.
 
-현재 구성은 두 축으로 나뉩니다.
+현재 기준의 주 실행 경로는 `StructuredLightControlPanel.exe` GUI입니다.
+GUI는 Python PC 컨트롤러를 실행하고, Android 앱 연결 URL을 보여주며, 멀티 각도 촬영의 `Next Angle` 신호와 DLPC350 Blue LED 제어를 제공합니다.
 
-- `PRO4500.exe`: 기존 Win32 프로그램. PRO4500/LightCrafter 계열 장치의 Blue LED 전류 제어와 폴더 이미지 전체화면 투사를 담당합니다.
-- `structured_light_pc_controller.py`: 새 PC 마스터 컨트롤러. 패턴을 PC 확장 디스플레이에 순차 표시하고, Android 앱에 Wi-Fi 촬영 명령을 보내고, 업로드된 이미지를 로그와 함께 저장합니다.
+## 현재 구성
 
-완전한 패턴-사진 번호 동기화가 필요하면 `structured_light_pc_controller.py`가 패턴 표시까지 직접 담당해야 합니다. 기존 `PRO4500.exe`를 독립 실행해서 타이머로 패턴을 넘기면 PC 컨트롤러가 "현재 어떤 패턴이 실제 표시 중인지"를 ACK로 받을 수 없어서 사진 번호가 꼬일 수 있습니다.
+- `StructuredLightControlPanel.exe`
+  - Windows용 주 제어 패널입니다.
+  - `structured_light_pc_controller.py`를 백그라운드로 실행합니다.
+  - 패턴 폴더, 출력 폴더, PC IP/포트, 모니터 번호, 각도, 노출/ISO/초점 값을 설정합니다.
+  - 여러 각도를 촬영할 때 `Next Angle` 버튼으로 다음 각도 진행 신호를 보냅니다.
+  - LightCrafter 4500/DLPC350 USB 연결이 가능하면 Blue LED 밝기를 제어합니다.
+  - `.toolchains`에 ADB가 준비되어 있으면 APK를 USB로 설치할 수 있습니다.
 
-## 전체 구조
+- `structured_light_pc_controller.py`
+  - 실제 스캔을 진행하는 PC 마스터 컨트롤러입니다.
+  - FastAPI WebSocket/HTTP 서버를 열고 Android 앱을 기다립니다.
+  - OpenCV 창으로 패턴을 표시합니다.
+  - 각 패턴마다 Android 앱에 `capture` 명령을 보내고, HTTP 업로드와 WebSocket `capture_done`을 모두 받은 뒤 다음 패턴으로 넘어갑니다.
+  - 결과 이미지는 `captures/<scan_id>/`에 저장하고, `scan_log.json`, `scan_log.csv`를 남깁니다.
 
-1. PC가 FastAPI WebSocket/HTTP 서버를 시작합니다.
-2. Android 앱 `StructuredLightPhoneCamera`가 `ws://<PC_IP>:8765/ws`로 연결합니다.
-3. PC가 프로젝터가 연결된 Windows 확장 디스플레이에 패턴 이미지를 표시합니다.
-4. PC가 `settle-ms`만큼 기다립니다.
-5. PC가 Android 앱에 `capture` 명령을 보냅니다.
-6. Android 앱이 CameraX로 후면 카메라 사진을 촬영합니다.
-7. Android 앱이 `/upload`로 JPEG를 multipart 업로드합니다.
-8. Android 앱이 WebSocket으로 `capture_done`을 보냅니다.
-9. PC는 업로드와 `capture_done` 둘 다 확인한 뒤 다음 패턴으로 넘어갑니다.
-10. 종료 후 `scan_log.json`과 `scan_log.csv`를 저장합니다.
+- `android/StructuredLightPhoneCamera`
+  - Android CameraX 기반 휴대폰 촬영 앱입니다.
+  - PC WebSocket URL에 연결하고 `capture` 명령을 받으면 JPEG를 촬영합니다.
+  - 촬영 이미지를 PC의 `/upload` 엔드포인트로 업로드한 뒤 `capture_done`을 보냅니다.
+  - `Use PC camera settings`를 켠 경우에만 PC에서 보낸 노출/ISO/초점 값이 촬영에 반영됩니다.
 
-## 필요한 장비
+- `tools/generate_fpp_patterns.py`
+  - 현재 기본 FPP 패턴 14장을 `generated_patterns/`에 생성합니다.
+  - 구성: White 1장, Black 1장, 8-bit Gray-code 8장, 4-step PSP sine 4장.
+  - 기본 해상도는 `1280 x 800`, 기본 포맷은 BMP입니다.
+
+- `PRO4500.exe`
+  - 기존 네이티브 패턴 표시/LED 제어 유틸리티입니다.
+  - 휴대폰 촬영 동기화까지 포함한 현재 워크플로에서는 `StructuredLightControlPanel.exe` 또는 Python 컨트롤러를 사용합니다.
+
+## 필요 장비
 
 - Windows PC
-- Galaxy S23 또는 CameraX가 동작하는 Android 폰
-- PRO4500 또는 HDMI 프로젝터
-- PC와 폰이 같은 Wi-Fi/LAN에 연결된 공유기
-- 구조광 촬영 대상, 고정 지그, 가능하면 주변광 차단
+- PRO4500 또는 HDMI 확장 디스플레이로 인식되는 프로젝터
+- Galaxy S23 또는 CameraX가 동작하는 Android 휴대폰
+- PC와 휴대폰이 같은 Wi-Fi/LAN에 연결된 네트워크
+- Windows 방화벽에서 TCP `8765` 인바운드 허용
+- 선택 사항: LightCrafter 4500/DLPC350 USB 연결, ADB USB 디버깅
 
-## 네트워크 설정
+## 빠른 시작
 
-- PC와 폰은 같은 LAN에 있어야 합니다.
-- Windows 방화벽에서 TCP `8765` 포트를 허용해야 합니다.
-- PC IP는 `ipconfig`에서 확인합니다. 예: `192.168.0.12`
-- Android 앱에는 `ws://192.168.0.12:8765/ws` 형식으로 입력합니다.
+### 1. PC Python 환경 준비
 
-## PC Python 환경
-
-Python 3.10 이상을 권장합니다. 현재 스크립트는 Python 3.12 기준으로 작성했지만, 3.10+에서도 동작하도록 제한했습니다.
-
-이 PC에서 바로 준비하려면:
+처음 한 번 실행합니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\prepare_pc_python_env.ps1
 ```
 
-성공 후 PC 컨트롤러는 다음 Python으로 실행합니다.
+이 스크립트는 로컬 `.toolchains/python312`와 `.venv-pc`를 준비하고 `requirements.txt`를 설치합니다.
+
+### 2. FPP 패턴 생성
 
 ```powershell
-.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1
+.\.venv-pc\Scripts\python.exe tools\generate_fpp_patterns.py
 ```
 
-수동으로 준비하려면:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install -r requirements.txt
-```
-
-더미 패턴을 만들려면:
-
-```powershell
-python tools\generate_dummy_patterns.py --output example_patterns --count 8 --width 1280 --height 800
-```
-
-기존 구조광 패턴을 쓰려면 `generated_patterns` 또는 `patterns\fpp_14`를 지정합니다.
-
-## PC 실행 예
-
-터미널 명령 대신 GUI를 쓰려면 루트의 실행 파일을 더블클릭합니다.
+생성 위치:
 
 ```text
-StructuredLightControlPanel.exe
+generated_patterns/
+  00_White.bmp
+  01_Black.bmp
+  02_Gray0.bmp
+  ...
+  13_Sine_270.bmp
 ```
 
-GUI에서 패턴 폴더, 출력 폴더, 모니터 번호, 노출값을 설정하고 `Start Scan`을 누르면 됩니다. Android 앱에는 GUI 상단에 표시되는 `Phone URL`을 입력합니다. `Patterns` 폴더 안의 지원 이미지 파일은 전부 순서대로 실행되므로 패턴 개수는 폴더 구성으로 조절합니다. `Angles`에 `0,180`처럼 여러 각도를 입력하면 한 각도 시퀀스가 끝난 뒤 `Next Angle` 버튼이 활성화됩니다. PCB를 회전한 다음 `Next Angle`을 누르면 다음 각도 패턴 시퀀스가 이어집니다. `Blue LED` 슬라이더, `Apply LED`, `LED Off`로 PRO4500/LightCrafter 4500의 Blue LED 세기를 조절할 수 있습니다. 스크립트 런처가 더 편하면 `StructuredLightControlPanel.vbs` 또는 `run_control_panel.bat`도 사용할 수 있습니다.
+프로젝터가 다른 해상도로 노출되는 경우 `tools/generate_fpp_patterns.py`의 `PROJECTOR_WIDTH`, `PROJECTOR_HEIGHT`, `GRAY_CODE_BITS`를 조정한 뒤 다시 생성합니다.
 
-GUI 실행 파일을 다시 빌드하려면:
+### 3. Android 앱 준비
 
-```text
-build_native_control_panel.bat
-```
-
-```powershell
-python structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --settle-ms 300 --exposure-us 10000 --iso 100 --manual true
-```
-
-두 각도 촬영을 수동 회전으로 진행하려면:
-
-```powershell
-python structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --angles 0,180 --settle-ms 300
-```
-
-GUI에서는 두 번째 각도부터 `Next Angle` 버튼으로 진행합니다. 터미널에서 직접 실행하면 콘솔 Enter 대기 방식을 사용할 수 있고, 모터 제어 명령이 있으면 다음처럼 붙일 수 있습니다.
-
-```powershell
-python structured_light_pc_controller.py --angles 0,180 --rotation-command "python tools\rotate_stage.py --angle {angle}"
-```
-
-## Android 앱 빌드
-
-Android Studio에서 다음 폴더를 엽니다.
+Android Studio에서 다음 프로젝트를 열어 빌드할 수 있습니다.
 
 ```text
 android/StructuredLightPhoneCamera
 ```
 
-이 저장소에는 Gradle Wrapper JAR를 생성해 넣지 않았습니다. Android Studio에서 프로젝트를 열어 Gradle Sync를 실행하거나, 로컬 Gradle이 있다면 `gradle -p android/StructuredLightPhoneCamera :app:assembleDebug`로 빌드합니다.
-
-빌드 후 Galaxy S23에 설치합니다. 앱 실행 시 카메라 권한을 허용하고 PC WebSocket URL을 입력한 뒤 `Connect`를 누릅니다.
-
-앱은 CameraX Preview + ImageCapture를 사용합니다. 수동 노출/ISO/초점은 Camera2Interop으로 적용을 시도합니다. 기기/렌즈에서 수동 설정을 지원하지 않으면 앱 로그에 표시하고 자동 모드로 촬영합니다.
-
-첫 버전은 JPEG 촬영/업로드만 구현했습니다. DNG/RAW 저장은 Camera2 기반 확장 작업으로 남겨두었습니다.
-
-## APK만 만들어서 폰으로 보내기
-
-이 PC에 Android Studio가 없어도, 루트에서 다음 PowerShell 스크립트를 실행하면 프로젝트 폴더 안의 `.toolchains`에 JDK/Gradle/Android SDK를 내려받고 APK까지 빌드합니다.
+로컬 빌드 도구를 자동으로 준비하고 APK까지 만들려면:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\prepare_android_build_toolchain.ps1
 ```
 
-이미 도구가 준비되어 있으면 다음 배치 파일만 실행해도 됩니다.
+이미 도구가 준비되어 있으면 APK만 다시 빌드합니다.
 
 ```powershell
 .\build_phone_apk.bat
 ```
 
-성공하면 아래 APK가 생성됩니다.
+빌드 결과:
 
 ```text
 dist\StructuredLightPhoneCamera-debug.apk
 ```
 
-이 APK를 Galaxy S23으로 복사해서 열면 설치할 수 있습니다. 폰에서 "알 수 없는 앱 설치 허용"과 카메라 권한 허용이 필요할 수 있습니다.
-
-USB 디버깅과 `adb`가 준비되어 있으면 다음 명령으로 바로 설치할 수도 있습니다.
+ADB가 준비되어 있고 휴대폰 USB 디버깅이 켜져 있으면:
 
 ```powershell
 .\install_phone_apk_adb.bat
 ```
 
-## 스캔 절차
+GUI의 `Install APK by USB` 버튼도 같은 APK를 설치합니다.
 
-1. PC와 폰을 같은 Wi-Fi에 연결합니다.
-2. 프로젝터를 Windows 확장 디스플레이로 설정합니다.
-3. PC에서 Python 컨트롤러를 실행합니다.
-4. Android 앱에서 PC WebSocket URL을 입력하고 연결합니다.
-5. PC 컨트롤러가 패턴을 표시하고 폰 촬영/업로드를 반복합니다.
-6. 완료 후 `captures/<scan_id>/`에서 이미지를 확인합니다.
-7. `scan_log.json`과 `scan_log.csv`에서 패턴 파일명, `pattern_id`, `capture_id`, 업로드 파일명을 확인합니다.
+### 4. GUI 실행
+
+```powershell
+.\StructuredLightControlPanel.exe
+```
+
+또는:
+
+```powershell
+.\run_control_panel.bat
+```
+
+주요 입력값:
+
+- `Patterns`: `generated_patterns` 폴더
+- `Output`: `captures` 폴더
+- `Host`: 보통 `0.0.0.0`
+- `Public IP`: 휴대폰에서 접근 가능한 PC LAN IP
+- `Port`: 기본 `8765`
+- `Monitor`: 프로젝터가 연결된 확장 디스플레이 번호. 보통 주 모니터가 `0`, 프로젝터가 `1`
+- `Angles`: 예: `0` 또는 `0,180`
+- `Settle ms`: 패턴 표시 후 촬영 명령 전 대기 시간
+- `Exposure us`, `ISO`, `Focus`: Android 앱에서 `Use PC camera settings`를 켰을 때 사용할 촬영 설정
+
+GUI 상단의 `Phone URL` 값을 Android 앱의 `PC WebSocket URL`에 입력하고 `Connect`를 누릅니다.
+연결 후 GUI에서 `Start Scan`을 누르면 스캔이 시작됩니다.
+
+## Android 앱 사용
+
+1. 앱 실행 후 카메라 권한을 허용합니다.
+2. `PC WebSocket URL`에 GUI가 보여주는 URL을 입력합니다.
+   - 예: `ws://192.168.0.12:8765/ws`
+3. `Connect`를 누르고 상태가 `connected`인지 확인합니다.
+4. 휴대폰 자체 설정을 사용할 경우 앱에서 노출/ISO/초점 값을 입력하고 `Apply`를 누릅니다.
+5. PC 설정을 촬영마다 반영하려면 `Use PC camera settings`를 켭니다.
+6. 초점 고정이 필요하면 `AF Once`, `Lock AF`, 화면 터치 초점, 또는 `Manual focus distance`를 사용합니다.
+
+현재 Android 앱은 JPEG 촬영과 업로드를 구현합니다. RAW/DNG 저장과 포인트클라우드 계산은 아직 포함되어 있지 않습니다.
+
+## Python CLI 실행
+
+GUI 없이 직접 실행할 수도 있습니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py `
+  --patterns generated_patterns `
+  --output captures `
+  --monitor 1 `
+  --settle-ms 300 `
+  --exposure-us 10000 `
+  --iso 100 `
+  --manual true
+```
+
+테스트용 작은 패턴을 만들고 창 모드로 실행하려면:
+
+```powershell
+.\.venv-pc\Scripts\python.exe tools\generate_dummy_patterns.py --output example_patterns --count 4 --width 1280 --height 800
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --patterns example_patterns --output captures --windowed --monitor 0
+```
+
+멀티 각도 촬영 예:
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --angles 0,180
+```
+
+CLI에서는 다음 각도로 이동할 때 콘솔에서 Enter를 누릅니다.
+GUI에서는 같은 상황에서 `Next Angle` 버튼이 활성화됩니다.
+
+외부 회전 스테이지 명령을 붙일 수도 있습니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --angles 0,180 --rotation-command "my_rotate_command --angle {angle}"
+```
+
+사용 가능한 주요 옵션은 다음 명령으로 확인합니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --help
+```
+
+## 네트워크 프로토콜
+
+PC가 항상 마스터입니다. Android 앱은 스스로 다음 패턴으로 진행하지 않습니다.
+
+- WebSocket: `ws://<pc_ip>:8765/ws`
+- Upload: `http://<pc_ip>:8765/upload`
+- Health: `GET http://<pc_ip>:8765/health`
+
+각 패턴에서 PC는 다음 두 조건을 모두 만족해야 다음 패턴으로 넘어갑니다.
+
+1. Android가 HTTP `/upload`로 이미지를 업로드했습니다.
+2. Android가 같은 `scan_id`, `pattern_id`, `capture_id`에 대해 WebSocket `capture_done`을 보냈습니다.
+
+자세한 메시지 형식은 `protocol.md`를 참고하세요.
 
 ## 출력 구조
+
+기본 출력 폴더는 `captures/`입니다.
 
 ```text
 captures/
@@ -166,39 +222,58 @@ captures/
     scan_log.csv
 ```
 
-## 간단 테스트
+`scan_log.csv`에는 각 패턴의 표시 시간, 촬영 명령 시간, 업로드 시간, 휴대폰 타임스탬프, 저장 파일명이 기록됩니다.
 
-1. `python tools\generate_dummy_patterns.py --output example_patterns --count 4`
-2. `python structured_light_pc_controller.py --patterns example_patterns --output captures --windowed --monitor 0`
-3. Android 앱에서 `ws://<PC_IP>:8765/ws`로 연결
-4. 4장의 패턴마다 사진이 촬영되고 PC로 업로드되는지 확인
-5. `scan_log.csv`에서 `pattern_000.png`와 `capture_000.jpg`가 매칭되는지 확인
-6. Wi-Fi를 잠시 끊어 timeout/retry 로그가 남는지 확인
+## 보조 도구
+
+- `tools/project_angle_sequence.py`
+  - 카메라 없이 패턴 표시 순서와 0/180도 같은 각도 전환을 테스트합니다.
+  - 결과 로그는 `projection_runs/`에 저장됩니다.
+
+- `tools/run_scan_sequence.py`
+  - OpenCV 카메라 또는 IP 카메라 URL을 직접 열어 촬영하는 초기 실험용 스크립트입니다.
+  - 현재 휴대폰 앱 동기화 워크플로의 주 경로는 아닙니다.
+
+- `build_native_control_panel.bat`
+  - MinGW-w64로 `StructuredLightControlPanel.exe`를 다시 빌드합니다.
+
+- `build.bat`
+  - 기존 `PRO4500.exe`를 다시 빌드합니다.
 
 ## 문제 해결
 
-- 폰이 PC에 연결 안 됨: PC IP, 같은 LAN 여부, Windows 방화벽의 8765 포트 허용을 확인합니다.
-- 업로드 실패: Android 앱의 `upload_url` 로그와 PC 콘솔의 `/upload` 수신 로그를 확인합니다.
-- 카메라 권한 실패: Android 설정에서 앱 카메라 권한을 허용합니다.
-- 이미지가 어둡거나 밝음: `--exposure-us`, `--iso`, 프로젝터 밝기를 조정합니다.
-- 패턴과 사진 번호가 안 맞음: `PRO4500.exe` 독립 투사 대신 `structured_light_pc_controller.py`의 패턴 표시 모드를 사용합니다.
-- 프로젝터 화면이 다른 모니터에 뜸: `--monitor`, `--windowed`, `--window-x`, `--window-y` 옵션을 조정합니다.
+- 휴대폰이 연결되지 않음
+  - PC와 휴대폰이 같은 네트워크에 있는지 확인합니다.
+  - GUI의 `Public IP`가 휴대폰에서 접근 가능한 IP인지 확인합니다.
+  - Windows 방화벽에서 TCP `8765`를 허용합니다.
+  - 휴대폰 브라우저에서 `http://<PC_IP>:8765/health`가 열리는지 확인합니다.
 
-## 구조광 촬영 주의사항
+- 업로드 실패
+  - Android 앱 로그의 `upload_url`과 PC 콘솔/GUI 로그의 `/upload` 수신 로그를 확인합니다.
+  - PC IP가 VPN, 가상 어댑터, 다른 LAN IP로 잘못 잡힌 경우 `Public IP`를 수동으로 입력합니다.
 
-- 가능하면 자동노출, 자동초점, 자동화이트밸런스를 끕니다.
-- 카메라, 프로젝터, 대상은 촬영 중 움직이지 않게 고정합니다.
-- 프로젝터 밝기와 주변 조명을 고정합니다.
-- 패턴 표시 직후에는 `--settle-ms`로 안정화 시간을 둡니다.
-- HDR, Night mode, Beauty/filter, flash는 사용하지 않습니다.
+- 프로젝터가 아닌 다른 화면에 패턴이 표시됨
+  - Windows 디스플레이 설정에서 프로젝터를 확장 디스플레이로 설정합니다.
+  - GUI의 `Monitor` 값을 바꿔 봅니다.
+  - 확인용으로 `Windowed projection`을 켜고 위치를 확인합니다.
 
-## Height Map / Point Cloud
+- PC에서 입력한 노출/ISO가 적용되지 않음
+  - Android 앱에서 `Use PC camera settings`가 켜져 있는지 확인합니다.
+  - 휴대폰 카메라가 Camera2 수동 노출을 지원하지 않으면 앱 로그에 unsupported 메시지가 표시되고 자동 모드로 촬영됩니다.
 
-이 커밋은 원격 촬영과 이미지 수집 자동화까지 구현합니다. 실제 height map과 point cloud 산출에는 다음 단계가 추가로 필요합니다.
+- 패턴 번호와 사진 번호가 어긋남
+  - 휴대폰 동기화 촬영에는 `StructuredLightControlPanel.exe` 또는 `structured_light_pc_controller.py`를 사용합니다.
+  - 기존 `PRO4500.exe`를 단독으로 실행하면 Android 앱과 패턴 진행 ACK를 맞출 수 없습니다.
 
-- Gray-code/PSP 디코딩
-- 카메라-프로젝터 calibration
-- 기준 평면 보정
-- 삼각측량 및 `.ply`/height image 출력
+- Blue LED 제어 실패
+  - LightCrafter 4500/DLPC350 USB가 연결되어 있는지 확인합니다.
+  - 다른 프로그램이 장치를 점유하고 있지 않은지 확인합니다.
+  - 장치를 열 수 없으면 GUI 로그에 `LightCrafter 4500 not found or cannot be opened`가 표시됩니다.
 
-캡처 결과와 로그는 이 후처리 파이프라인의 입력으로 사용할 수 있게 `scan_id`, `pattern_id`, `capture_id`, `angle_deg`를 일관되게 남깁니다.
+## 현재 한계
+
+- 휴대폰 앱은 JPEG 촬영/업로드만 지원합니다.
+- Height map, point cloud, Gray/PSP 디코딩 파이프라인은 아직 포함되어 있지 않습니다.
+- 프로젝터와 카메라는 소프트웨어 핸드셰이크로 동기화됩니다. 하드웨어 트리거 동기화는 구현되어 있지 않습니다.
+- 기본 FPP 패턴 생성 설정은 코드 상수로 고정되어 있습니다.
+- 회전 스테이지는 수동 `Next Angle` 또는 외부 `--rotation-command`로 연결합니다.
