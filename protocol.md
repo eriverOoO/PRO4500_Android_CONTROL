@@ -77,7 +77,7 @@ Android sends this only after the HTTP upload succeeds.
   "pattern_id": 0,
   "capture_id": 0,
   "angle_deg": 0,
-  "filename": "scan_20260629_001_angle_000_pattern_000_capture_000.jpg",
+  "filename": "scan_20260629_001_angle_000_pattern_000_capture_000.png",
   "timestamp_phone_ms": 1782348234234,
   "upload_status": "ok"
 }
@@ -108,12 +108,12 @@ Fields:
 - `pattern_id`: integer
 - `capture_id`: integer
 - `angle_deg`: optional integer
-- `file`: JPEG image file
+- `file`: PNG image file
 
 PC stores the file as:
 
 ```text
-<scan_id>[_angle_000]_pattern_000_capture_000.jpg
+<scan_id>[_angle_000]_pattern_000_capture_000.png
 ```
 
 ## Synchronization Rule

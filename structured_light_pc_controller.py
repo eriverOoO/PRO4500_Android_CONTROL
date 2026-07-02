@@ -281,7 +281,7 @@ def create_app(state: ControllerState) -> FastAPI:
         scan_id = safe_scan_id(scan_id)
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in {".jpg", ".jpeg", ".png", ".dng"}:
-            suffix = ".jpg"
+            suffix = ".png"
 
         angle_text = "" if angle_deg is None else f"_angle_{angle_deg:03d}"
         filename = f"{scan_id}{angle_text}_pattern_{pattern_id:03d}_capture_{capture_id:03d}{suffix}"

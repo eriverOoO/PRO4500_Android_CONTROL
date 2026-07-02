@@ -4,7 +4,13 @@ import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
@@ -32,6 +38,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -47,6 +54,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -721,8 +729,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun captureStill(command: JSONObject) {
-        // First version stores JPEG only. RAW/DNG should be added with a
-        // dedicated Camera2 path after the synchronized JPEG loop is stable.
+        // CameraX file output is JPEG-oriented, so capture in memory and encode
+        // PNG explicitly to make the saved file match its extension.
         val capture = imageCapture
         if (capture == null) {
             sendCaptureError(command, "ImageCapture is not ready")
@@ -734,7 +742,7 @@ class MainActivity : ComponentActivity() {
         val captureId = command.getInt("capture_id")
         val angle = if (command.has("angle_deg")) command.optInt("angle_deg") else null
         val anglePart = angle?.let { "_angle_%03d".format(Locale.US, it) } ?: ""
-        val filename = "%s%s_pattern_%03d_capture_%03d.jpg".format(
+        val filename = "%s%s_pattern_%03d_capture_%03d.png".format(
             Locale.US,
             scanId,
             anglePart,
@@ -744,15 +752,26 @@ class MainActivity : ComponentActivity() {
 
         val captureDir = File(cacheDir, "captures").apply { mkdirs() }
         val outputFile = File(captureDir, filename)
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
 
         capture.takePicture(
-            outputOptions,
             cameraExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    appendLog("Saved local image: ${outputFile.name}")
-                    uploadCapture(command, outputFile)
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    try {
+                        val bitmap = imageProxyToBitmap(image)
+                        outputFile.outputStream().use { output ->
+                            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                                throw IOException("PNG encoder returned false")
+                            }
+                        }
+                        bitmap.recycle()
+                        appendLog("Saved local image: ${outputFile.name}")
+                        uploadCapture(command, outputFile)
+                    } catch (exception: Exception) {
+                        sendCaptureError(command, "PNG save failed: ${exception.message}")
+                    } finally {
+                        image.close()
+                    }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -760,6 +779,70 @@ class MainActivity : ComponentActivity() {
                 }
             },
         )
+    }
+
+    private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
+        val bitmap = when (image.format) {
+            ImageFormat.JPEG -> {
+                val buffer = image.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining())
+                buffer.get(bytes)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    ?: throw IOException("Failed to decode JPEG capture")
+            }
+            ImageFormat.YUV_420_888 -> {
+                val bytes = yuv420ToNv21(image)
+                val yuvImage = YuvImage(bytes, ImageFormat.NV21, image.width, image.height, null)
+                val jpegStream = ByteArrayOutputStream()
+                if (!yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 100, jpegStream)) {
+                    throw IOException("Failed to convert YUV capture")
+                }
+                val jpegBytes = jpegStream.toByteArray()
+                BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                    ?: throw IOException("Failed to decode converted capture")
+            }
+            else -> throw IOException("Unsupported capture format: ${image.format}")
+        }
+
+        val rotationDegrees = image.imageInfo.rotationDegrees
+        if (rotationDegrees == 0) {
+            return bitmap
+        }
+        val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        bitmap.recycle()
+        return rotated
+    }
+
+    private fun yuv420ToNv21(image: ImageProxy): ByteArray {
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val width = image.width
+        val height = image.height
+        val nv21 = ByteArray(width * height * 3 / 2)
+
+        var outputOffset = 0
+        val yBuffer = yPlane.buffer
+        for (row in 0 until height) {
+            yBuffer.position(row * yPlane.rowStride)
+            yBuffer.get(nv21, outputOffset, width)
+            outputOffset += width
+        }
+
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+        val chromaHeight = height / 2
+        val chromaWidth = width / 2
+        for (row in 0 until chromaHeight) {
+            for (col in 0 until chromaWidth) {
+                val vIndex = row * vPlane.rowStride + col * vPlane.pixelStride
+                val uIndex = row * uPlane.rowStride + col * uPlane.pixelStride
+                nv21[outputOffset++] = vBuffer.get(vIndex)
+                nv21[outputOffset++] = uBuffer.get(uIndex)
+            }
+        }
+        return nv21
     }
 
     private fun uploadCapture(command: JSONObject, file: File) {
@@ -777,7 +860,7 @@ class MainActivity : ComponentActivity() {
             .addFormDataPart(
                 "file",
                 file.name,
-                file.asRequestBody("image/jpeg".toMediaType()),
+                file.asRequestBody("image/png".toMediaType()),
             )
         if (command.has("angle_deg")) {
             bodyBuilder.addFormDataPart("angle_deg", command.optInt("angle_deg").toString())
