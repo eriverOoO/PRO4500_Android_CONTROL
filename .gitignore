@@ -27,10 +27,18 @@
 !GUI/hidapi-master/LICENSE*.txt
 !GUI/hidapi-master/README.txt
 !GUI/hidapi-master/linux/README.txt
-*.pyc
-__pycache__/
+# Python virtual environments and caches
 .venv/
 .venv-pc/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 patterns/
 scans/
 captures/
