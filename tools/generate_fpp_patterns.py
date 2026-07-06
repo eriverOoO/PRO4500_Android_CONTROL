@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a 14-frame structured-light pattern sequence.
+"""Generate the decoder-contract structured-light pattern sequence.
 
 This script creates only image files. It does not open a camera, show windows,
 or send any hardware trigger/control commands.
@@ -7,6 +7,8 @@ or send any hardware trigger/control commands.
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
 import tempfile
 import uuid
@@ -33,8 +35,12 @@ IMAGE_FORMAT = "bmp"
 # Patterns are written to the project root, not inside tools/.
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "generated_patterns"
 
-# Remove old generated PNG/BMP files before writing the new 14-frame sequence.
+# Remove old generated PNG/BMP files before writing the new sequence.
 CLEAN_EXISTING_IMAGES = True
+
+# The new default decoder contract is 22 frames:
+# White, Black, Gray0..Gray7, Sine_000..Sine_270, Gray0_inv..Gray7_inv.
+INCLUDE_INVERTED_GRAY = True
 
 
 def gray_encode(values: np.ndarray) -> np.ndarray:
@@ -130,6 +136,14 @@ def write_image(path: Path, image: np.ndarray) -> None:
     temp_path.replace(path)
 
 
+def sequence_record(index: int, label: str, filename: str) -> dict[str, object]:
+    return {
+        "pattern_id": index,
+        "label": label,
+        "filename": filename,
+    }
+
+
 def generate_patterns() -> list[Path]:
     stripe_width_px = validate_config()
 
@@ -151,14 +165,23 @@ def generate_patterns() -> list[Path]:
             np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH), dtype=np.uint8),
         ),
     ]
+    sequence: list[dict[str, object]] = [
+        sequence_record(0, "White", f"00_White.{extension}"),
+        sequence_record(1, "Black", f"01_Black.{extension}"),
+    ]
 
+    gray_images: list[np.ndarray] = []
     for gray_index in range(GRAY_CODE_BITS):
+        image = vertical_gray_pattern(gray_index, stripe_width_px)
+        gray_images.append(image)
+        filename = f"{gray_index + 2:02d}_Gray{gray_index}.{extension}"
         frames.append(
             (
-                f"{gray_index + 2:02d}_Gray{gray_index}.{extension}",
-                vertical_gray_pattern(gray_index, stripe_width_px),
+                filename,
+                image,
             )
         )
+        sequence.append(sequence_record(gray_index + 2, f"Gray{gray_index}", filename))
 
     phase_shifts = (
         ("000", 0.0),
@@ -167,15 +190,25 @@ def generate_patterns() -> list[Path]:
         ("270", 3.0 * math.pi / 2.0),
     )
     for sine_index, (label, shift_rad) in enumerate(phase_shifts, start=10):
+        filename = f"{sine_index:02d}_Sine_{label}.{extension}"
         frames.append(
             (
-                f"{sine_index:02d}_Sine_{label}.{extension}",
+                filename,
                 vertical_sine_pattern(shift_rad, stripe_width_px),
             )
         )
+        sequence.append(sequence_record(sine_index, f"Sine_{label}", filename))
 
-    if len(frames) != 14:
-        raise RuntimeError(f"Expected 14 frames, got {len(frames)}.")
+    if INCLUDE_INVERTED_GRAY:
+        for gray_index, image in enumerate(gray_images):
+            pattern_id = 14 + gray_index
+            filename = f"{pattern_id:02d}_Gray{gray_index}_inv.{extension}"
+            frames.append((filename, 255 - image))
+            sequence.append(sequence_record(pattern_id, f"Gray{gray_index}_inv", filename))
+
+    expected_count = 22 if INCLUDE_INVERTED_GRAY else 14
+    if len(frames) != expected_count:
+        raise RuntimeError(f"Expected {expected_count} frames, got {len(frames)}.")
 
     written: list[Path] = []
     for filename, image in frames:
@@ -183,16 +216,70 @@ def generate_patterns() -> list[Path]:
         write_image(path, image)
         written.append(path)
 
+    (OUTPUT_DIR / "sequence.json").write_text(
+        json.dumps(
+            {
+                "pattern_count": len(sequence),
+                "patterns": sorted(sequence, key=lambda item: int(item["pattern_id"])),
+                "gray_code_bits": GRAY_CODE_BITS,
+                "projector_width": PROJECTOR_WIDTH,
+                "projector_height": PROJECTOR_HEIGHT,
+                "finest_gray_stripe_width_px": stripe_width_px,
+                "sinusoidal_wavelength_px": stripe_width_px,
+                "includes_inverted_gray": INCLUDE_INVERTED_GRAY,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
     print(f"Generated {len(written)} {IMAGE_FORMAT.upper()} patterns in: {OUTPUT_DIR}")
     print(f"Resolution: {PROJECTOR_WIDTH} x {PROJECTOR_HEIGHT}")
     print(f"Gray-code bits: {GRAY_CODE_BITS}")
     print(f"Finest Gray stripe width: {stripe_width_px} px")
     print(f"Sinusoidal wavelength: {stripe_width_px} px")
+    print(f"Inverted Gray frames: {'yes' if INCLUDE_INVERTED_GRAY else 'no'}")
 
     return written
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate PRO4500 Gray/PSP patterns for the decoder contract."
+    )
+    parser.add_argument("--output", default=OUTPUT_DIR, type=Path)
+    parser.add_argument("--width", default=PROJECTOR_WIDTH, type=int)
+    parser.add_argument("--height", default=PROJECTOR_HEIGHT, type=int)
+    parser.add_argument("--gray-code-bits", default=GRAY_CODE_BITS, type=int)
+    parser.add_argument("--format", default=IMAGE_FORMAT, choices=("bmp", "png"))
+    parser.add_argument(
+        "--legacy-14",
+        action="store_true",
+        help="Generate only White/Black, Gray0..Gray7, and 4 sine frames.",
+    )
+    parser.add_argument("--no-clean", action="store_true")
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
+    global PROJECTOR_WIDTH
+    global PROJECTOR_HEIGHT
+    global GRAY_CODE_BITS
+    global IMAGE_FORMAT
+    global OUTPUT_DIR
+    global CLEAN_EXISTING_IMAGES
+    global INCLUDE_INVERTED_GRAY
+
+    PROJECTOR_WIDTH = args.width
+    PROJECTOR_HEIGHT = args.height
+    GRAY_CODE_BITS = args.gray_code_bits
+    IMAGE_FORMAT = args.format
+    OUTPUT_DIR = args.output
+    CLEAN_EXISTING_IMAGES = not args.no_clean
+    INCLUDE_INVERTED_GRAY = not args.legacy_14
+
     generate_patterns()
     return 0
 

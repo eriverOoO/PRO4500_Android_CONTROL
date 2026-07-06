@@ -17,7 +17,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,83 @@ from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconn
 
 
 IMAGE_SUFFIXES = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+PATTERN_LABELS: dict[int, str] = {
+    0: "White",
+    1: "Black",
+    2: "Gray0",
+    3: "Gray1",
+    4: "Gray2",
+    5: "Gray3",
+    6: "Gray4",
+    7: "Gray5",
+    8: "Gray6",
+    9: "Gray7",
+    10: "Sine_000",
+    11: "Sine_090",
+    12: "Sine_180",
+    13: "Sine_270",
+    14: "Gray0_inv",
+    15: "Gray1_inv",
+    16: "Gray2_inv",
+    17: "Gray3_inv",
+    18: "Gray4_inv",
+    19: "Gray5_inv",
+    20: "Gray6_inv",
+    21: "Gray7_inv",
+}
+FULL_PATTERN_IDS = tuple(range(22))
+LEGACY_PATTERN_IDS = tuple(range(14))
+INTERLEAVED_22_ORDER = (
+    0,
+    1,
+    2,
+    14,
+    3,
+    15,
+    4,
+    16,
+    5,
+    17,
+    6,
+    18,
+    7,
+    19,
+    8,
+    20,
+    9,
+    21,
+    10,
+    11,
+    12,
+    13,
+)
+
+
+@dataclass(frozen=True)
+class PatternSpec:
+    pattern_id: int
+    label: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class ExposureBracket:
+    label: str
+    exposure_us: int
+    iso: int
+
+    @property
+    def exposure_product(self) -> float:
+        return float(max(1, self.exposure_us) * max(1, self.iso))
+
+
+@dataclass(frozen=True)
+class HdrSettings:
+    enabled: bool
+    brackets: tuple[ExposureBracket, ...]
+    saturated_threshold: int
+    dark_threshold: int
+    bit_depth: int
 
 
 def now_ms() -> int:
@@ -56,6 +133,42 @@ def parse_csv_ints(value: str, label: str) -> list[int]:
     return items
 
 
+def parse_bracket_spec(value: str) -> tuple[ExposureBracket, ...]:
+    brackets: list[ExposureBracket] = []
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(":")]
+        if len(parts) not in {2, 3}:
+            raise argparse.ArgumentTypeError(
+                "HDR brackets must use label:exposure_us[:iso], "
+                "for example short:2500:100,mid:10000:100,long:40000:100"
+            )
+        label = safe_filename_stem(parts[0])
+        try:
+            exposure_us = int(parts[1])
+            iso = int(parts[2]) if len(parts) == 3 else 100
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid HDR bracket numeric value in {item!r}"
+            ) from exc
+        if exposure_us <= 0 or iso <= 0:
+            raise argparse.ArgumentTypeError(
+                f"HDR bracket exposure_us and iso must be positive in {item!r}"
+            )
+        brackets.append(ExposureBracket(label=label, exposure_us=exposure_us, iso=iso))
+
+    if not brackets:
+        raise argparse.ArgumentTypeError("At least one HDR bracket is required")
+
+    labels = [bracket.label for bracket in brackets]
+    if len(labels) != len(set(labels)):
+        raise argparse.ArgumentTypeError("HDR bracket labels must be unique")
+
+    return tuple(brackets)
+
+
 def safe_scan_id(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
         raise ValueError("scan_id may contain only letters, numbers, '.', '_' and '-'")
@@ -68,10 +181,30 @@ def pattern_sort_key(path: Path) -> tuple[int, str]:
     return index, path.name.lower()
 
 
-def load_patterns(pattern_dir: Path) -> list[Path]:
+def expected_pattern_ids(mode: str) -> tuple[int, ...]:
+    if mode == "legacy-14":
+        return LEGACY_PATTERN_IDS
+    if mode == "22":
+        return FULL_PATTERN_IDS
+    raise ValueError(f"unknown pattern mode: {mode}")
+
+
+def label_from_filename(path: Path, pattern_id: int) -> str:
+    if pattern_id in PATTERN_LABELS:
+        return PATTERN_LABELS[pattern_id]
+    stem = path.stem
+    return re.sub(r"^\d+[_-]?", "", stem) or stem
+
+
+def parse_pattern_id(path: Path, fallback: int) -> int:
+    match = re.match(r"^(\d+)", path.name)
+    return int(match.group(1)) if match else fallback
+
+
+def load_patterns(pattern_dir: Path, mode: str) -> list[PatternSpec]:
     if not pattern_dir.exists():
         raise SystemExit(f"Pattern directory does not exist: {pattern_dir}")
-    patterns = sorted(
+    pattern_paths = sorted(
         [
             path
             for path in pattern_dir.iterdir()
@@ -79,9 +212,39 @@ def load_patterns(pattern_dir: Path) -> list[Path]:
         ],
         key=pattern_sort_key,
     )
-    if not patterns:
+    if not pattern_paths:
         raise SystemExit(f"No pattern images found in {pattern_dir}")
-    return patterns
+
+    specs_by_id: dict[int, PatternSpec] = {}
+    for fallback, path in enumerate(pattern_paths):
+        pattern_id = parse_pattern_id(path, fallback)
+        if pattern_id in specs_by_id:
+            raise SystemExit(
+                f"Duplicate pattern id {pattern_id:03d}: "
+                f"{specs_by_id[pattern_id].path.name} and {path.name}"
+            )
+        specs_by_id[pattern_id] = PatternSpec(
+            pattern_id=pattern_id,
+            label=label_from_filename(path, pattern_id),
+            path=path,
+        )
+
+    expected_ids = expected_pattern_ids(mode)
+    missing = [pattern_id for pattern_id in expected_ids if pattern_id not in specs_by_id]
+    if missing:
+        missing_text = ", ".join(f"{pattern_id:03d}" for pattern_id in missing)
+        raise SystemExit(
+            f"Pattern directory {pattern_dir} is missing required pattern ids: {missing_text}. "
+            "Run tools/generate_fpp_patterns.py to create the default 22-frame set, "
+            "or pass --pattern-mode legacy-14 for the old 14-frame workflow."
+        )
+
+    unexpected = sorted(set(specs_by_id) - set(expected_ids))
+    if unexpected:
+        unexpected_text = ", ".join(f"{pattern_id:03d}" for pattern_id in unexpected)
+        print(f"[patterns] ignoring ids outside {mode}: {unexpected_text}")
+
+    return [specs_by_id[pattern_id] for pattern_id in expected_ids]
 
 
 def read_image(path: Path) -> np.ndarray:
@@ -90,6 +253,116 @@ def read_image(path: Path) -> np.ndarray:
     if image is None:
         raise SystemExit(f"Could not decode image: {path}")
     return image
+
+
+def read_gray_image(path: Path) -> np.ndarray:
+    data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise SystemExit(f"Could not decode grayscale image: {path}")
+    return image
+
+
+def write_image(path: Path, image: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, encoded = cv2.imencode(path.suffix or ".png", image)
+    if not ok:
+        raise OSError(f"Could not encode image: {path}")
+    path.write_bytes(encoded.tobytes())
+
+
+def rel_posix(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def safe_filename_stem(value: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    stem = stem.strip("._")
+    return stem or "frame"
+
+
+def default_hdr_brackets(exposure_us: int, iso: int) -> tuple[ExposureBracket, ...]:
+    mid = max(1, exposure_us)
+    return (
+        ExposureBracket("short", max(1, mid // 4), max(1, iso)),
+        ExposureBracket("mid", mid, max(1, iso)),
+        ExposureBracket("long", max(1, mid * 4), max(1, iso)),
+    )
+
+
+def read_bracket_config(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"Could not read bracket config {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON bracket config {path}: {exc}") from exc
+
+
+def bracket_from_mapping(item: dict[str, Any]) -> ExposureBracket:
+    label = safe_filename_stem(str(item.get("label", "")))
+    try:
+        exposure_us = int(item["exposure_us"])
+        iso = int(item.get("iso", item.get("sensitivity_iso", 100)))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            "Each bracket config item must include label, exposure_us, and optional iso"
+        ) from exc
+    if exposure_us <= 0 or iso <= 0:
+        raise SystemExit("Bracket exposure_us and iso must be positive")
+    return ExposureBracket(label=label, exposure_us=exposure_us, iso=iso)
+
+
+def build_hdr_settings(args: argparse.Namespace) -> HdrSettings:
+    config: dict[str, Any] = {}
+    if args.bracket_config:
+        config = read_bracket_config(args.bracket_config)
+
+    saturated_threshold = int(
+        config.get("saturated_threshold", args.saturated_threshold)
+    )
+    dark_threshold = int(config.get("dark_threshold", args.dark_threshold))
+    bit_depth = int(config.get("hdr_bit_depth", args.hdr_bit_depth))
+    if bit_depth not in {8, 16}:
+        raise SystemExit("--hdr-bit-depth must be 8 or 16")
+    if not (0 <= dark_threshold <= 255 and 0 <= saturated_threshold <= 255):
+        raise SystemExit("HDR thresholds must be in the 0..255 range")
+    if dark_threshold >= saturated_threshold:
+        raise SystemExit("dark threshold must be lower than saturated threshold")
+
+    if args.legacy_single_exposure:
+        brackets = (
+            ExposureBracket(
+                label="single",
+                exposure_us=max(1, args.exposure_us),
+                iso=max(1, args.iso),
+            ),
+        )
+        return HdrSettings(
+            enabled=False,
+            brackets=brackets,
+            saturated_threshold=saturated_threshold,
+            dark_threshold=dark_threshold,
+            bit_depth=bit_depth,
+        )
+
+    if "brackets" in config:
+        config_brackets = config["brackets"]
+        if not isinstance(config_brackets, list) or not config_brackets:
+            raise SystemExit("bracket config 'brackets' must be a non-empty list")
+        brackets = tuple(bracket_from_mapping(item) for item in config_brackets)
+    elif args.hdr_brackets:
+        brackets = parse_bracket_spec(args.hdr_brackets)
+    else:
+        brackets = default_hdr_brackets(args.exposure_us, args.iso)
+
+    return HdrSettings(
+        enabled=len(brackets) > 1,
+        brackets=brackets,
+        saturated_threshold=saturated_threshold,
+        dark_threshold=dark_threshold,
+        bit_depth=bit_depth,
+    )
 
 
 def guess_lan_ip() -> str:
@@ -122,6 +395,13 @@ class PendingCapture:
     angle_deg: int
     attempt: int
     result_future: asyncio.Future
+    pattern_label: str = ""
+    bracket_label: str = ""
+    bracket_index: int = 0
+    exposure_us: int | None = None
+    iso: int | None = None
+    focus_diopters: float | None = None
+    decode_dir: Path | None = None
     upload_record: dict[str, Any] | None = None
     done_message: dict[str, Any] | None = None
     error_message: dict[str, Any] | None = None
@@ -198,6 +478,13 @@ class ControllerState:
         capture_id: int,
         angle_deg: int,
         attempt: int,
+        pattern_label: str = "",
+        bracket_label: str = "",
+        bracket_index: int = 0,
+        exposure_us: int | None = None,
+        iso: int | None = None,
+        focus_diopters: float | None = None,
+        decode_dir: Path | None = None,
     ) -> PendingCapture:
         future = asyncio.get_running_loop().create_future()
         pending = PendingCapture(
@@ -207,6 +494,13 @@ class ControllerState:
             angle_deg=angle_deg,
             attempt=attempt,
             result_future=future,
+            pattern_label=pattern_label,
+            bracket_label=bracket_label,
+            bracket_index=bracket_index,
+            exposure_us=exposure_us,
+            iso=iso,
+            focus_diopters=focus_diopters,
+            decode_dir=decode_dir,
         )
         self.pending[pending.key] = pending
         return pending
@@ -276,6 +570,10 @@ def create_app(state: ControllerState) -> FastAPI:
         pattern_id: int = Form(...),
         capture_id: int = Form(...),
         angle_deg: int | None = Form(None),
+        bracket_label: str | None = Form(None),
+        exposure_us: int | None = Form(None),
+        iso: int | None = Form(None),
+        focus_diopters: float | None = Form(None),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
         scan_id = safe_scan_id(scan_id)
@@ -283,11 +581,28 @@ def create_app(state: ControllerState) -> FastAPI:
         if suffix not in {".jpg", ".jpeg", ".png", ".dng"}:
             suffix = ".png"
 
-        angle_text = "" if angle_deg is None else f"_angle_{angle_deg:03d}"
-        filename = f"{scan_id}{angle_text}_pattern_{pattern_id:03d}_capture_{capture_id:03d}{suffix}"
         scan_dir = state.output_root / scan_id
-        scan_dir.mkdir(parents=True, exist_ok=True)
-        destination = scan_dir / filename
+        key = (scan_id, int(pattern_id), int(capture_id))
+        pending = state.pending.get(key)
+
+        if pending is not None and pending.decode_dir is not None:
+            label = safe_filename_stem(pending.bracket_label or bracket_label or "frame")
+            filename = f"{label}{suffix}"
+            destination = (
+                pending.decode_dir
+                / "exposures"
+                / f"pattern_{pattern_id:03d}"
+                / filename
+            )
+        else:
+            angle_text = "" if angle_deg is None else f"_angle_{angle_deg:03d}"
+            filename = (
+                f"{scan_id}{angle_text}_pattern_{pattern_id:03d}_"
+                f"capture_{capture_id:03d}{suffix}"
+            )
+            destination = scan_dir / filename
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
         size_bytes = 0
         with destination.open("wb") as output:
@@ -305,8 +620,15 @@ def create_app(state: ControllerState) -> FastAPI:
             "angle_deg": angle_deg,
             "filename": filename,
             "path": str(destination),
+            "relative_path": rel_posix(destination, scan_dir),
             "size_bytes": size_bytes,
             "upload_timestamp_pc_ms": now_ms(),
+            "pattern_label": pending.pattern_label if pending else None,
+            "bracket_label": pending.bracket_label if pending else bracket_label,
+            "bracket_index": pending.bracket_index if pending else None,
+            "exposure_us": pending.exposure_us if pending else exposure_us,
+            "iso": pending.iso if pending else iso,
+            "focus_diopters": pending.focus_diopters if pending else focus_diopters,
         }
         state.resolve_upload(upload_record)
         print(f"[upload] saved {filename} ({size_bytes} bytes)")
@@ -433,7 +755,9 @@ def make_capture_message(
     args: argparse.Namespace,
     *,
     scan_id: str,
-    pattern_id: int,
+    pattern: PatternSpec,
+    bracket: ExposureBracket,
+    bracket_index: int,
     capture_id: int,
     angle_deg: int,
     attempt: int,
@@ -442,15 +766,25 @@ def make_capture_message(
     return {
         "type": "capture",
         "scan_id": scan_id,
-        "pattern_id": pattern_id,
+        "pattern_id": pattern.pattern_id,
+        "pattern_label": pattern.label,
         "capture_id": capture_id,
         "angle_deg": angle_deg,
         "attempt": attempt,
         "upload_url": upload_url,
+        "bracket_label": bracket.label,
+        "bracket": {
+            "index": bracket_index,
+            "label": bracket.label,
+            "exposure_us": bracket.exposure_us,
+            "iso": bracket.iso,
+        },
         "settings": {
             "manual": args.manual,
-            "exposure_us": args.exposure_us,
-            "iso": args.iso,
+            "manual_focus": args.manual_focus,
+            "awb_locked": args.awb_locked,
+            "exposure_us": bracket.exposure_us,
+            "iso": bracket.iso,
             "focus_diopters": args.focus_diopters,
             "settle_ms_before_capture": args.phone_settle_ms,
         },
@@ -511,6 +845,9 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "scan_id",
         "angle_deg",
         "pattern_id",
+        "pattern_label",
+        "bracket_label",
+        "bracket_index",
         "capture_id",
         "attempt",
         "pattern_filename",
@@ -519,6 +856,10 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "upload_timestamp_pc_ms",
         "timestamp_phone_ms",
         "received_image_filename",
+        "received_image_relative_path",
+        "exposure_us",
+        "iso",
+        "focus_diopters",
         "status",
         "error",
     ]
@@ -529,176 +870,557 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def decode_dir_for_angle(scan_dir: Path, angles: list[int], angle: int) -> Path:
+    if len(angles) == 1:
+        return scan_dir
+    return scan_dir / f"angle_{angle:03d}"
+
+
+def ordered_patterns(patterns: list[PatternSpec], args: argparse.Namespace) -> list[PatternSpec]:
+    by_id = {pattern.pattern_id: pattern for pattern in patterns}
+    if args.capture_order == "id" or args.pattern_mode == "legacy-14":
+        order = [pattern.pattern_id for pattern in patterns]
+    else:
+        order = [pattern_id for pattern_id in INTERLEAVED_22_ORDER if pattern_id in by_id]
+    return [by_id[pattern_id] for pattern_id in order]
+
+
+def selected_counts(selected_index: np.ndarray, brackets: list[ExposureBracket]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for index, bracket in enumerate(brackets):
+        counts[bracket.label] = int(np.count_nonzero(selected_index == index))
+    return counts
+
+
+def merge_hdr_pattern(
+    *,
+    decode_dir: Path,
+    scan_dir: Path,
+    pattern: PatternSpec,
+    bracket_records: list[dict[str, Any]],
+    hdr_settings: HdrSettings,
+) -> dict[str, Any]:
+    if not bracket_records:
+        raise RuntimeError(f"No bracket frames for pattern {pattern.pattern_id:03d}")
+
+    records = sorted(
+        bracket_records,
+        key=lambda record: (
+            float(max(1, int(record["exposure_us"])) * max(1, int(record["iso"]))),
+            int(record.get("bracket_index", 0)),
+        ),
+    )
+    images = [read_gray_image(Path(record["path"])) for record in records]
+    shape = images[0].shape
+    if any(image.shape != shape for image in images):
+        raise RuntimeError(f"HDR bracket image sizes do not match for {pattern.label}")
+
+    exposure_products = np.array(
+        [
+            float(max(1, int(record["exposure_us"])) * max(1, int(record["iso"])))
+            for record in records
+        ],
+        dtype=np.float64,
+    )
+
+    selected = images[0].astype(np.float64)
+    selected_eff = np.full(shape, exposure_products[0], dtype=np.float64)
+    selected_index = np.zeros(shape, dtype=np.uint8)
+    for index, image in enumerate(images):
+        not_saturated = image < hdr_settings.saturated_threshold
+        selected[not_saturated] = image[not_saturated]
+        selected_eff[not_saturated] = exposure_products[index]
+        selected_index[not_saturated] = index
+
+    stack = np.stack(images, axis=0)
+    saturated_mask = np.all(stack >= hdr_settings.saturated_threshold, axis=0)
+    dark_mask = np.all(stack <= hdr_settings.dark_threshold, axis=0)
+
+    reference_eff = float(np.max(exposure_products))
+    normalized = np.clip((selected / selected_eff) * reference_eff / 255.0, 0.0, 1.0)
+    max_value = 65535 if hdr_settings.bit_depth == 16 else 255
+    dtype = np.uint16 if hdr_settings.bit_depth == 16 else np.uint8
+    final_image = np.rint(normalized * max_value).astype(dtype)
+
+    final_path = decode_dir / f"pattern_{pattern.pattern_id:03d}.png"
+    mask_dir = decode_dir / "hdr_masks"
+    saturated_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_saturated.png"
+    dark_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_dark.png"
+    write_image(final_path, final_image)
+    write_image(saturated_path, saturated_mask.astype(np.uint8) * 255)
+    write_image(dark_path, dark_mask.astype(np.uint8) * 255)
+
+    ordered_brackets = [
+        ExposureBracket(
+            label=str(record["bracket_label"]),
+            exposure_us=int(record["exposure_us"]),
+            iso=int(record["iso"]),
+        )
+        for record in records
+    ]
+
+    return {
+        "pattern_id": pattern.pattern_id,
+        "label": pattern.label,
+        "filename": final_path.name,
+        "bracket_filenames": [rel_posix(Path(record["path"]), decode_dir) for record in records],
+        "exposure_us": [int(record["exposure_us"]) for record in records],
+        "iso": [int(record["iso"]) for record in records],
+        "focus_diopters": records[0].get("focus_diopters"),
+        "merge": {
+            "algorithm": "longest_unsaturated_radiance_normalized",
+            "enabled": hdr_settings.enabled,
+            "bit_depth": hdr_settings.bit_depth,
+            "saturated_threshold": hdr_settings.saturated_threshold,
+            "dark_threshold": hdr_settings.dark_threshold,
+            "reference_exposure_product": reference_eff,
+            "selected_pixel_counts": selected_counts(selected_index, ordered_brackets),
+            "saturated_mask": rel_posix(saturated_path, decode_dir),
+            "dark_mask": rel_posix(dark_path, decode_dir),
+        },
+        "captures": [
+            {
+                "bracket_label": record.get("bracket_label"),
+                "bracket_index": record.get("bracket_index"),
+                "filename": rel_posix(Path(record["path"]), decode_dir),
+                "exposure_us": record.get("exposure_us"),
+                "iso": record.get("iso"),
+                "focus_diopters": record.get("focus_diopters"),
+                "capture_id": record.get("capture_id"),
+                "capture_command_timestamp_pc_ms": record.get(
+                    "capture_command_timestamp_pc_ms"
+                ),
+                "upload_timestamp_pc_ms": record.get("upload_timestamp_pc_ms"),
+                "timestamp_phone_ms": record.get("timestamp_phone_ms"),
+            }
+            for record in records
+        ],
+    }
+
+
+def write_decode_logs(
+    *,
+    scan_dir: Path,
+    decode_records: dict[str, list[dict[str, Any]]],
+    base_log: dict[str, Any],
+) -> None:
+    for decode_dir_text, records in decode_records.items():
+        decode_dir = Path(decode_dir_text)
+        records_sorted = sorted(records, key=lambda item: int(item["pattern_id"]))
+        log = dict(base_log)
+        log["decode_dir"] = str(decode_dir)
+        log["patterns"] = records_sorted
+        (decode_dir / "scan_log.json").write_text(
+            json.dumps(log, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (decode_dir / "hdr_merge_report.json").write_text(
+            json.dumps(
+                {
+                    "scan_id": base_log["scan_id"],
+                    "decode_dir": str(decode_dir),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "patterns": [
+                        {
+                            "pattern_id": record["pattern_id"],
+                            "label": record["label"],
+                            "filename": record["filename"],
+                            "merge": record["merge"],
+                        }
+                        for record in records_sorted
+                    ],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+
+def validate_decode_folder(decode_dir: Path, expected_ids: tuple[int, ...]) -> None:
+    missing = [
+        pattern_id
+        for pattern_id in expected_ids
+        if not (decode_dir / f"pattern_{pattern_id:03d}.png").exists()
+    ]
+    if not missing:
+        return
+    missing_text = ", ".join(f"{pattern_id:03d}" for pattern_id in missing)
+    raise RuntimeError(f"Decode folder {decode_dir} is missing pattern ids: {missing_text}")
+
+
+def make_synthetic_capture(
+    *,
+    pattern: PatternSpec,
+    bracket: ExposureBracket,
+    brackets: tuple[ExposureBracket, ...],
+    destination: Path,
+) -> None:
+    base = read_gray_image(pattern.path).astype(np.float64)
+    sorted_brackets = sorted(brackets, key=lambda item: item.exposure_product)
+    reference = sorted_brackets[len(sorted_brackets) // 2].exposure_product
+    simulated = np.clip(base * bracket.exposure_product / reference, 0.0, 255.0)
+    write_image(destination, np.rint(simulated).astype(np.uint8))
+
+
 async def run_scan(args: argparse.Namespace) -> int:
     pattern_dir = args.patterns.resolve()
-    patterns = load_patterns(pattern_dir)
-    first_image = read_image(patterns[0])
+    patterns = load_patterns(pattern_dir, args.pattern_mode)
+    capture_patterns = ordered_patterns(patterns, args)
+    first_image = read_image(capture_patterns[0].path)
     output_root = args.output.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     scan_id = safe_scan_id(args.scan_id or datetime.now().strftime("scan_%Y%m%d_%H%M%S"))
     scan_dir = output_root / scan_id
     scan_dir.mkdir(parents=True, exist_ok=True)
-
-    state = ControllerState(output_root=output_root)
-    app = create_app(state)
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level=args.log_level)
-    server = uvicorn.Server(config)
-    server_task = asyncio.create_task(server.serve())
-
-    upload_host = local_url_host(args)
-    upload_url = f"http://{upload_host}:{args.port}/upload"
-    ws_url = f"ws://{upload_host}:{args.port}/ws"
+    expected_ids = expected_pattern_ids(args.pattern_mode)
     angles = parse_csv_ints(args.angles, "angles")
+    hdr_settings = build_hdr_settings(args)
+
     scan_rows: list[dict[str, Any]] = []
+    decode_records: dict[str, list[dict[str, Any]]] = {}
     display: PatternDisplay | None = None
     capture_id = 0
     aborted = False
+    validation_error = ""
+    state: ControllerState | None = None
+    server: uvicorn.Server | None = None
+    server_task: asyncio.Task | None = None
 
-    print(f"[server] WebSocket URL for Android: {ws_url}")
-    print(f"[server] Upload URL sent to Android: {upload_url}")
-    print(f"[scan] scan_id={scan_id} patterns={len(patterns)} angles={angles}")
+    print(
+        f"[scan] scan_id={scan_id} mode={args.pattern_mode} "
+        f"patterns={len(capture_patterns)} angles={angles} dry_run={args.dry_run}"
+    )
+    print(
+        "[scan] HDR brackets="
+        + ", ".join(
+            f"{bracket.label}:{bracket.exposure_us}us:ISO{bracket.iso}"
+            for bracket in hdr_settings.brackets
+        )
+    )
+
+    def add_decode_record(decode_dir: Path, record: dict[str, Any]) -> None:
+        decode_records.setdefault(str(decode_dir), []).append(record)
+
+    def make_base_row(
+        *,
+        angle: int,
+        pattern: PatternSpec,
+        bracket: ExposureBracket,
+        bracket_index: int,
+        current_capture_id: int,
+        attempt: int,
+        display_ts: int,
+        command_ts: int,
+    ) -> dict[str, Any]:
+        return {
+            "scan_id": scan_id,
+            "angle_deg": angle,
+            "pattern_id": pattern.pattern_id,
+            "pattern_label": pattern.label,
+            "bracket_label": bracket.label,
+            "bracket_index": bracket_index,
+            "capture_id": current_capture_id,
+            "attempt": attempt,
+            "pattern_filename": pattern.path.name,
+            "pattern_display_timestamp_pc_ms": display_ts,
+            "capture_command_timestamp_pc_ms": command_ts,
+            "exposure_us": bracket.exposure_us,
+            "iso": bracket.iso,
+            "focus_diopters": args.focus_diopters,
+        }
+
+    def merge_completed_pattern(
+        *,
+        decode_dir: Path,
+        pattern: PatternSpec,
+        bracket_records: list[dict[str, Any]],
+    ) -> None:
+        record = merge_hdr_pattern(
+            decode_dir=decode_dir,
+            scan_dir=scan_dir,
+            pattern=pattern,
+            bracket_records=bracket_records,
+            hdr_settings=hdr_settings,
+        )
+        add_decode_record(decode_dir, record)
+        print(
+            f"[hdr] merged pattern={pattern.pattern_id:03d} "
+            f"label={pattern.label} -> {decode_dir / record['filename']}"
+        )
 
     try:
-        await asyncio.sleep(0.5)
-        if args.server_only:
-            print("[server] Running in server-only mode. Press Ctrl+C to stop.")
-            while True:
-                await asyncio.sleep(3600)
-
-        print("[scan] Waiting for Android app WebSocket connection...")
-        await state.wait_for_phone()
-        if not args.no_ping_check:
-            state.pong_event.clear()
-            await state.send_json({"type": "ping", "timestamp_pc_ms": now_ms()})
-            try:
-                await asyncio.wait_for(state.pong_event.wait(), args.ping_timeout)
-                print("[scan] ping/pong check ok")
-            except asyncio.TimeoutError:
-                print("[scan] ping/pong check timed out; continuing with capture handshake")
-
-        if not args.no_display:
-            display = PatternDisplay(args, first_image)
-            display.open()
-            display.black()
-            await asyncio.sleep(args.pre_black_ms / 1000.0)
-
-        previous_angle: int | None = None
-        for angle_index, angle in enumerate(angles):
-            if args.rotation_command and (angle_index > 0 or args.rotate_first_angle):
-                if display is not None:
-                    display.black()
-                await run_rotation_command(
-                    args.rotation_command,
-                    angle=angle,
-                    angle_index=angle_index,
-                    previous_angle=previous_angle,
-                    scan_dir=scan_dir,
-                )
-            elif angle_index > 0 or args.pause_before_first_angle:
-                if display is not None:
-                    display.black()
-                if args.angle_advance_file:
-                    await wait_for_angle_advance(
-                        args.angle_advance_file,
-                        angle=angle,
-                        angle_index=angle_index,
-                    )
-                elif not args.no_angle_prompt:
-                    await asyncio.to_thread(
-                        input,
-                        f"Set rotation stage to {angle} degrees, then press Enter...",
-                    )
-
-            for pattern_id, pattern_path in enumerate(patterns):
-                image = read_image(pattern_path)
-                success = False
-                last_error = ""
-
-                for attempt in range(1, args.retries + 2):
-                    if display is not None:
-                        display.show(image)
-                    display_ts = now_ms()
-                    await asyncio.sleep(args.settle_ms / 1000.0)
-
-                    pending = state.register_pending(
-                        scan_id=scan_id,
-                        pattern_id=pattern_id,
-                        capture_id=capture_id,
-                        angle_deg=angle,
-                        attempt=attempt,
-                    )
-                    message = make_capture_message(
-                        args,
-                        scan_id=scan_id,
-                        pattern_id=pattern_id,
-                        capture_id=capture_id,
-                        angle_deg=angle,
-                        attempt=attempt,
-                        upload_url=upload_url,
-                    )
-                    command_ts = now_ms()
-                    await state.send_json(message)
-                    print(
-                        f"[capture] angle={angle:03d} pattern={pattern_id:03d} "
-                        f"capture={capture_id:03d} attempt={attempt}"
-                    )
-
-                    row: dict[str, Any] = {
-                        "scan_id": scan_id,
-                        "angle_deg": angle,
-                        "pattern_id": pattern_id,
-                        "capture_id": capture_id,
-                        "attempt": attempt,
-                        "pattern_filename": pattern_path.name,
-                        "pattern_display_timestamp_pc_ms": display_ts,
-                        "capture_command_timestamp_pc_ms": command_ts,
-                    }
-
-                    try:
-                        timeout_s = args.capture_timeout + args.upload_timeout
-                        result = await asyncio.wait_for(pending.result_future, timeout_s)
-                        upload = result["upload"]
-                        done = result["done"]
+        if args.dry_run:
+            for angle in angles:
+                decode_dir = decode_dir_for_angle(scan_dir, angles, angle)
+                decode_dir.mkdir(parents=True, exist_ok=True)
+                print(f"[dry-run] angle={angle:03d} decode_dir={decode_dir}")
+                for pattern in capture_patterns:
+                    bracket_records: list[dict[str, Any]] = []
+                    for bracket_index, bracket in enumerate(hdr_settings.brackets):
+                        display_ts = now_ms()
+                        command_ts = display_ts
+                        destination = (
+                            decode_dir
+                            / "exposures"
+                            / f"pattern_{pattern.pattern_id:03d}"
+                            / f"{bracket.label}.png"
+                        )
+                        make_synthetic_capture(
+                            pattern=pattern,
+                            bracket=bracket,
+                            brackets=hdr_settings.brackets,
+                            destination=destination,
+                        )
+                        upload_ts = now_ms()
+                        row = make_base_row(
+                            angle=angle,
+                            pattern=pattern,
+                            bracket=bracket,
+                            bracket_index=bracket_index,
+                            current_capture_id=capture_id,
+                            attempt=1,
+                            display_ts=display_ts,
+                            command_ts=command_ts,
+                        )
                         row.update(
                             {
-                                "upload_timestamp_pc_ms": upload.get("upload_timestamp_pc_ms"),
-                                "timestamp_phone_ms": done.get("timestamp_phone_ms"),
-                                "received_image_filename": upload.get("filename"),
+                                "upload_timestamp_pc_ms": upload_ts,
+                                "timestamp_phone_ms": None,
+                                "received_image_filename": destination.name,
+                                "received_image_relative_path": rel_posix(
+                                    destination, scan_dir
+                                ),
                                 "status": "ok",
                                 "error": "",
                             }
                         )
                         scan_rows.append(row)
-                        success = True
-                        state.finish_pending(pending.key)
+                        record = {
+                            **row,
+                            "filename": destination.name,
+                            "path": str(destination),
+                            "relative_path": rel_posix(destination, scan_dir),
+                            "size_bytes": destination.stat().st_size,
+                        }
+                        bracket_records.append(record)
                         capture_id += 1
-                        break
-                    except Exception as exc:
-                        last_error = str(exc)
-                        row.update(
-                            {
-                                "status": "retry" if attempt <= args.retries else "failed",
-                                "error": last_error,
-                            }
-                        )
-                        scan_rows.append(row)
-                        state.finish_pending(pending.key)
-                        print(
-                            f"[capture] failed angle={angle:03d} pattern={pattern_id:03d} "
-                            f"capture={capture_id:03d}: {last_error}"
-                        )
-                        capture_id += 1
-                        if attempt <= args.retries:
-                            await asyncio.sleep(args.retry_delay_ms / 1000.0)
 
-                if not success:
-                    aborted = True
-                    raise RuntimeError(
-                        f"scan aborted at angle={angle} pattern={pattern_id}: {last_error}"
+                    merge_completed_pattern(
+                        decode_dir=decode_dir,
+                        pattern=pattern,
+                        bracket_records=bracket_records,
+                    )
+        else:
+            state = ControllerState(output_root=output_root)
+            app = create_app(state)
+            config = uvicorn.Config(
+                app, host=args.host, port=args.port, log_level=args.log_level
+            )
+            server = uvicorn.Server(config)
+            server_task = asyncio.create_task(server.serve())
+
+            upload_host = local_url_host(args)
+            upload_url = f"http://{upload_host}:{args.port}/upload"
+            ws_url = f"ws://{upload_host}:{args.port}/ws"
+            print(f"[server] WebSocket URL for Android: {ws_url}")
+            print(f"[server] Upload URL sent to Android: {upload_url}")
+
+            await asyncio.sleep(0.5)
+            if args.server_only:
+                print("[server] Running in server-only mode. Press Ctrl+C to stop.")
+                while True:
+                    await asyncio.sleep(3600)
+
+            print("[scan] Waiting for Android app WebSocket connection...")
+            await state.wait_for_phone()
+            if not args.no_ping_check:
+                state.pong_event.clear()
+                await state.send_json({"type": "ping", "timestamp_pc_ms": now_ms()})
+                try:
+                    await asyncio.wait_for(state.pong_event.wait(), args.ping_timeout)
+                    print("[scan] ping/pong check ok")
+                except asyncio.TimeoutError:
+                    print("[scan] ping/pong check timed out; continuing with capture handshake")
+
+            if not args.no_display:
+                display = PatternDisplay(args, first_image)
+                display.open()
+                display.black()
+                await asyncio.sleep(args.pre_black_ms / 1000.0)
+
+            previous_angle: int | None = None
+            for angle_index, angle in enumerate(angles):
+                decode_dir = decode_dir_for_angle(scan_dir, angles, angle)
+                decode_dir.mkdir(parents=True, exist_ok=True)
+                if args.rotation_command and (angle_index > 0 or args.rotate_first_angle):
+                    if display is not None:
+                        display.black()
+                    await run_rotation_command(
+                        args.rotation_command,
+                        angle=angle,
+                        angle_index=angle_index,
+                        previous_angle=previous_angle,
+                        scan_dir=scan_dir,
+                    )
+                elif angle_index > 0 or args.pause_before_first_angle:
+                    if display is not None:
+                        display.black()
+                    if args.angle_advance_file:
+                        await wait_for_angle_advance(
+                            args.angle_advance_file,
+                            angle=angle,
+                            angle_index=angle_index,
+                        )
+                    elif not args.no_angle_prompt:
+                        await asyncio.to_thread(
+                            input,
+                            f"Set rotation stage to {angle} degrees, then press Enter...",
+                        )
+
+                for pattern in capture_patterns:
+                    image = read_image(pattern.path)
+                    bracket_records: list[dict[str, Any]] = []
+
+                    for bracket_index, bracket in enumerate(hdr_settings.brackets):
+                        success = False
+                        last_error = ""
+
+                        for attempt in range(1, args.retries + 2):
+                            if display is not None:
+                                display.show(image)
+                            display_ts = now_ms()
+                            settle_ms = (
+                                args.settle_ms
+                                if bracket_index == 0
+                                else args.bracket_settle_ms
+                            )
+                            await asyncio.sleep(settle_ms / 1000.0)
+
+                            pending = state.register_pending(
+                                scan_id=scan_id,
+                                pattern_id=pattern.pattern_id,
+                                capture_id=capture_id,
+                                angle_deg=angle,
+                                attempt=attempt,
+                                pattern_label=pattern.label,
+                                bracket_label=bracket.label,
+                                bracket_index=bracket_index,
+                                exposure_us=bracket.exposure_us,
+                                iso=bracket.iso,
+                                focus_diopters=args.focus_diopters,
+                                decode_dir=decode_dir,
+                            )
+                            message = make_capture_message(
+                                args,
+                                scan_id=scan_id,
+                                pattern=pattern,
+                                bracket=bracket,
+                                bracket_index=bracket_index,
+                                capture_id=capture_id,
+                                angle_deg=angle,
+                                attempt=attempt,
+                                upload_url=upload_url,
+                            )
+                            command_ts = now_ms()
+                            await state.send_json(message)
+                            print(
+                                f"[capture] angle={angle:03d} "
+                                f"pattern={pattern.pattern_id:03d} "
+                                f"bracket={bracket.label} capture={capture_id:03d} "
+                                f"attempt={attempt}"
+                            )
+
+                            row = make_base_row(
+                                angle=angle,
+                                pattern=pattern,
+                                bracket=bracket,
+                                bracket_index=bracket_index,
+                                current_capture_id=capture_id,
+                                attempt=attempt,
+                                display_ts=display_ts,
+                                command_ts=command_ts,
+                            )
+
+                            try:
+                                timeout_s = args.capture_timeout + args.upload_timeout
+                                result = await asyncio.wait_for(
+                                    pending.result_future, timeout_s
+                                )
+                                upload = result["upload"]
+                                done = result["done"]
+                                row.update(
+                                    {
+                                        "upload_timestamp_pc_ms": upload.get(
+                                            "upload_timestamp_pc_ms"
+                                        ),
+                                        "timestamp_phone_ms": done.get(
+                                            "timestamp_phone_ms"
+                                        ),
+                                        "received_image_filename": upload.get("filename"),
+                                        "received_image_relative_path": upload.get(
+                                            "relative_path"
+                                        ),
+                                        "status": "ok",
+                                        "error": "",
+                                    }
+                                )
+                                scan_rows.append(row)
+                                record = {
+                                    **row,
+                                    **upload,
+                                    "timestamp_phone_ms": done.get("timestamp_phone_ms"),
+                                    "capture_command_timestamp_pc_ms": command_ts,
+                                }
+                                bracket_records.append(record)
+                                success = True
+                                state.finish_pending(pending.key)
+                                capture_id += 1
+                                break
+                            except Exception as exc:
+                                last_error = str(exc)
+                                row.update(
+                                    {
+                                        "status": (
+                                            "retry"
+                                            if attempt <= args.retries
+                                            else "failed"
+                                        ),
+                                        "error": last_error,
+                                    }
+                                )
+                                scan_rows.append(row)
+                                state.finish_pending(pending.key)
+                                print(
+                                    f"[capture] failed angle={angle:03d} "
+                                    f"pattern={pattern.pattern_id:03d} "
+                                    f"bracket={bracket.label} capture={capture_id:03d}: "
+                                    f"{last_error}"
+                                )
+                                capture_id += 1
+                                if attempt <= args.retries:
+                                    await asyncio.sleep(args.retry_delay_ms / 1000.0)
+
+                        if not success:
+                            aborted = True
+                            raise RuntimeError(
+                                f"scan aborted at angle={angle} "
+                                f"pattern={pattern.pattern_id} bracket={bracket.label}: "
+                                f"{last_error}"
+                            )
+
+                    merge_completed_pattern(
+                        decode_dir=decode_dir,
+                        pattern=pattern,
+                        bracket_records=bracket_records,
                     )
 
-            previous_angle = angle
+                previous_angle = angle
+
+        if not args.server_only:
+            for decode_dir_text in decode_records:
+                validate_decode_folder(Path(decode_dir_text), expected_ids)
 
     except KeyboardInterrupt:
         aborted = True
@@ -712,19 +1434,73 @@ async def run_scan(args: argparse.Namespace) -> int:
             await asyncio.sleep(args.finish_black_ms / 1000.0)
             display.close()
 
+        if not aborted and not args.server_only:
+            try:
+                for decode_dir_text in decode_records:
+                    validate_decode_folder(Path(decode_dir_text), expected_ids)
+            except Exception as exc:
+                aborted = True
+                validation_error = str(exc)
+                print(f"[scan] ERROR: {validation_error}")
+
         log = {
             "scan_id": scan_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "status": "aborted" if aborted else "ok",
+            "validation_error": validation_error,
             "pattern_dir": str(pattern_dir),
-            "patterns": [path.name for path in patterns],
+            "pattern_mode": args.pattern_mode,
+            "pattern_order": [
+                {
+                    "pattern_id": pattern.pattern_id,
+                    "label": pattern.label,
+                    "filename": pattern.path.name,
+                }
+                for pattern in capture_patterns
+            ],
+            "expected_pattern_ids": list(expected_ids),
+            "decode_folders": sorted(decode_records),
             "angles_deg": angles,
+            "scan_type": args.scan_type,
+            "metadata": {
+                "scan_type": args.scan_type,
+                "projector_tilt_deg": args.projector_tilt_deg,
+                "manual_focus_confirmed": args.manual_focus_confirmed,
+                "phone_mount_id": args.phone_mount_id,
+                "rig_id": args.rig_id,
+                "calibration_id": args.calibration_id,
+                "projector_brightness": args.projector_brightness,
+                "keystone_predistortion": False,
+            },
+            "hdr": {
+                "enabled": hdr_settings.enabled,
+                "bit_depth": hdr_settings.bit_depth,
+                "saturated_threshold": hdr_settings.saturated_threshold,
+                "dark_threshold": hdr_settings.dark_threshold,
+                "brackets": [
+                    {
+                        "label": bracket.label,
+                        "exposure_us": bracket.exposure_us,
+                        "iso": bracket.iso,
+                    }
+                    for bracket in hdr_settings.brackets
+                ],
+            },
+            "decoder_contract": [
+                {
+                    "pattern_id": pattern_id,
+                    "label": PATTERN_LABELS.get(pattern_id, f"Pattern{pattern_id}"),
+                    "filename": f"pattern_{pattern_id:03d}.png",
+                }
+                for pattern_id in expected_ids
+            ],
             "settings": {
                 "settle_ms": args.settle_ms,
+                "bracket_settle_ms": args.bracket_settle_ms,
                 "phone_settle_ms": args.phone_settle_ms,
                 "manual": args.manual,
-                "exposure_us": args.exposure_us,
-                "iso": args.iso,
+                "manual_focus": args.manual_focus,
+                "awb_locked": args.awb_locked,
                 "focus_diopters": args.focus_diopters,
                 "capture_timeout": args.capture_timeout,
                 "upload_timeout": args.upload_timeout,
@@ -732,16 +1508,20 @@ async def run_scan(args: argparse.Namespace) -> int:
             },
             "rows": scan_rows,
         }
-        (scan_dir / "scan_log.json").write_text(
-            json.dumps(log, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+
+        if str(scan_dir) not in decode_records:
+            (scan_dir / "scan_log.json").write_text(
+                json.dumps(log, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        write_decode_logs(scan_dir=scan_dir, decode_records=decode_records, base_log=log)
         append_csv(scan_dir / "scan_log.csv", scan_rows)
         print(f"[scan] log saved: {scan_dir / 'scan_log.json'}")
         print(f"[scan] csv saved: {scan_dir / 'scan_log.csv'}")
 
-        server.should_exit = True
-        await server_task
+        if server is not None and server_task is not None:
+            server.should_exit = True
+            await server_task
 
     return 1 if aborted else 0
 
@@ -752,6 +1532,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--patterns", default="generated_patterns", type=Path)
     parser.add_argument("--output", default="captures", type=Path)
+    parser.add_argument(
+        "--pattern-mode",
+        default="22",
+        choices=("22", "legacy-14"),
+        help="Default 22-frame decoder contract, or old 14-frame capture.",
+    )
+    parser.add_argument(
+        "--capture-order",
+        default="interleaved",
+        choices=("interleaved", "id"),
+        help="Use Gray/Gray_inv interleaving for 22-frame capture or numeric id order.",
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--public-host", help="LAN IP/hostname sent to Android upload_url.")
     parser.add_argument("--port", default=8765, type=int)
@@ -762,6 +1554,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-y", type=int)
     parser.add_argument("--stretch", action="store_true", help="Stretch pattern to screen.")
     parser.add_argument("--settle-ms", default=300, type=int)
+    parser.add_argument("--bracket-settle-ms", default=80, type=int)
     parser.add_argument("--phone-settle-ms", default=0, type=int)
     parser.add_argument("--pre-black-ms", default=300, type=int)
     parser.add_argument("--finish-black-ms", default=300, type=int)
@@ -772,7 +1565,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manual", default=True, type=parse_bool)
     parser.add_argument("--exposure-us", default=10000, type=int)
     parser.add_argument("--iso", default=100, type=int)
+    parser.add_argument(
+        "--manual-focus",
+        default=True,
+        type=parse_bool,
+        help="Request fixed Camera2 focus distance on Android when PC settings are used.",
+    )
+    parser.add_argument(
+        "--awb-locked",
+        default=True,
+        type=parse_bool,
+        help="Request AWB off/locked on Android when supported.",
+    )
     parser.add_argument("--focus-diopters", default=0.0, type=float)
+    parser.add_argument(
+        "--hdr-brackets",
+        help=(
+            "Comma-separated label:exposure_us[:iso] list. "
+            "Default derives short/mid/long from --exposure-us and --iso."
+        ),
+    )
+    parser.add_argument(
+        "--bracket-config",
+        type=Path,
+        help="JSON config with brackets and optional HDR thresholds.",
+    )
+    parser.add_argument("--saturated-threshold", default=250, type=int)
+    parser.add_argument("--dark-threshold", default=5, type=int)
+    parser.add_argument("--hdr-bit-depth", default=8, type=int, choices=(8, 16))
+    parser.add_argument(
+        "--legacy-single-exposure",
+        action="store_true",
+        help="Capture one exposure per pattern and still write decoder-format files.",
+    )
+    parser.add_argument("--scan-type", default="object", choices=("object", "reference"))
+    parser.add_argument("--projector-tilt-deg", default=30.0, type=float)
+    parser.add_argument("--manual-focus-confirmed", default=False, type=parse_bool)
+    parser.add_argument("--phone-mount-id", default="")
+    parser.add_argument("--rig-id", default="")
+    parser.add_argument("--calibration-id", default="")
+    parser.add_argument("--projector-brightness", default="")
     parser.add_argument("--angles", default="0")
     parser.add_argument("--pause-before-first-angle", action="store_true")
     parser.add_argument("--no-angle-prompt", action="store_true")
@@ -782,6 +1614,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-id")
     parser.add_argument("--server-only", action="store_true")
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Create synthetic bracket frames, HDR merges, and scan_log.json without Android.",
+    )
     parser.add_argument("--no-ping-check", action="store_true")
     parser.add_argument("--ping-timeout", default=2.0, type=float)
     parser.add_argument(

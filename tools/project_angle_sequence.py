@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Project a 14-pattern sequence at one or more rotation angles.
+"""Project a generated structured-light sequence at one or more rotation angles.
 
 Default flow:
 
-    angle_000: project 00..13
+    angle_000: project 00..21
     prompt: rotate disk to 180 degrees and press Enter
-    angle_180: project 00..13
+    angle_180: project 00..21
 
 This is a projection-only tool. It does not open a camera. Future hardware
 automation can be attached with --rotation-command and --project-command.
@@ -373,7 +373,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pattern-dir", default=DEFAULT_PATTERN_DIR, type=Path)
     parser.add_argument("--output", default=DEFAULT_OUTPUT_DIR, type=Path)
     parser.add_argument("--angles", default="0,180", help="Comma-separated angle list.")
-    parser.add_argument("--expected-count", default=14, type=int)
+    parser.add_argument("--expected-count", default=22, type=int)
     parser.add_argument("--pattern-ms", default=700, type=int)
     parser.add_argument("--dark-ms", default=0, type=int)
     parser.add_argument("--finish-black-ms", default=300, type=int)

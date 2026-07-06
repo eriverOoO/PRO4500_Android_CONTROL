@@ -27,12 +27,22 @@ Android replies with `pong`.
   "type": "capture",
   "scan_id": "scan_20260629_001",
   "pattern_id": 0,
+  "pattern_label": "White",
   "capture_id": 0,
   "angle_deg": 0,
   "attempt": 1,
   "upload_url": "http://192.168.0.12:8765/upload",
+  "bracket_label": "mid",
+  "bracket": {
+    "index": 1,
+    "label": "mid",
+    "exposure_us": 10000,
+    "iso": 100
+  },
   "settings": {
     "manual": true,
+    "manual_focus": true,
+    "awb_locked": true,
     "exposure_us": 10000,
     "iso": 100,
     "focus_diopters": 0.0,
@@ -54,6 +64,8 @@ Optional fields:
 
 - `angle_deg`: rotation angle label
 - `attempt`: retry attempt number
+- `pattern_label`: decoder-contract label such as `Gray0_inv`
+- `bracket_label` and `bracket`: HDR exposure bracket metadata
 
 ## WebSocket: Android to PC
 
@@ -77,9 +89,19 @@ Android sends this only after the HTTP upload succeeds.
   "pattern_id": 0,
   "capture_id": 0,
   "angle_deg": 0,
+  "pattern_label": "White",
+  "bracket_label": "mid",
   "filename": "scan_20260629_001_angle_000_pattern_000_capture_000.png",
   "timestamp_phone_ms": 1782348234234,
-  "upload_status": "ok"
+  "upload_status": "ok",
+  "settings": {
+    "manual": true,
+    "manual_focus": true,
+    "awb_locked": true,
+    "exposure_us": 10000,
+    "iso": 100,
+    "focus_diopters": 0.0
+  }
 }
 ```
 
@@ -108,9 +130,27 @@ Fields:
 - `pattern_id`: integer
 - `capture_id`: integer
 - `angle_deg`: optional integer
+- `bracket_label`: optional HDR bracket label
+- `exposure_us`: optional camera exposure metadata
+- `iso`: optional camera sensitivity metadata
+- `focus_diopters`: optional focus metadata
 - `file`: PNG image file
 
-PC stores the file as:
+In the HDR workflow PC stores raw bracket files as:
+
+```text
+exposures/pattern_000/short.png
+exposures/pattern_000/mid.png
+exposures/pattern_000/long.png
+```
+
+and writes the decoder input image as:
+
+```text
+pattern_000.png
+```
+
+The legacy single-upload fallback stores the file as:
 
 ```text
 <scan_id>[_angle_000]_pattern_000_capture_000.png

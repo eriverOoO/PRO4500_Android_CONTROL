@@ -702,6 +702,8 @@ class MainActivity : ComponentActivity() {
         if (settingsJson != null && settings.usePcSettings) {
             val newSettings = settings.copy(
                 manualExposure = settingsJson.optBoolean("manual", settings.manualExposure),
+                manualFocus = settingsJson.optBoolean("manual_focus", settings.manualFocus),
+                awbLocked = settingsJson.optBoolean("awb_locked", settings.awbLocked),
                 exposureUs = settingsJson.optLong("exposure_us", settings.exposureUs),
                 iso = settingsJson.optInt("iso", settings.iso),
                 focusDiopters = settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()).toFloat(),
@@ -716,9 +718,10 @@ class MainActivity : ComponentActivity() {
         }
 
         val settleMs = settingsJson?.optLong("settle_ms_before_capture", 0L) ?: 0L
+        val bracketLabel = command.optString("bracket_label", "")
         setStatus("capturing")
-        setRecent("recent command: scan=$scanId pattern=$patternId capture=$captureId")
-        appendLog("Capture command scan=$scanId pattern=$patternId capture=$captureId settle=${settleMs}ms")
+        setRecent("recent command: scan=$scanId pattern=$patternId bracket=$bracketLabel capture=$captureId")
+        appendLog("Capture command scan=$scanId pattern=$patternId bracket=$bracketLabel capture=$captureId settle=${settleMs}ms")
 
         previewView.postDelayed(
             {
@@ -851,6 +854,7 @@ class MainActivity : ComponentActivity() {
         val patternId = command.getInt("pattern_id")
         val captureId = command.getInt("capture_id")
         val uploadUrl = command.getString("upload_url")
+        val settingsJson = command.optJSONObject("settings")
 
         val bodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -864,6 +868,18 @@ class MainActivity : ComponentActivity() {
             )
         if (command.has("angle_deg")) {
             bodyBuilder.addFormDataPart("angle_deg", command.optInt("angle_deg").toString())
+        }
+        if (command.has("bracket_label")) {
+            bodyBuilder.addFormDataPart("bracket_label", command.optString("bracket_label"))
+        }
+        if (settingsJson != null) {
+            bodyBuilder
+                .addFormDataPart("exposure_us", settingsJson.optLong("exposure_us", settings.exposureUs).toString())
+                .addFormDataPart("iso", settingsJson.optInt("iso", settings.iso).toString())
+                .addFormDataPart(
+                    "focus_diopters",
+                    settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()).toString(),
+                )
         }
 
         val request = Request.Builder()
@@ -891,6 +907,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendCaptureDone(command: JSONObject, filename: String) {
+        val settingsJson = command.optJSONObject("settings")
         val message = JSONObject()
             .put("type", "capture_done")
             .put("scan_id", command.getString("scan_id"))
@@ -899,8 +916,25 @@ class MainActivity : ComponentActivity() {
             .put("filename", filename)
             .put("timestamp_phone_ms", System.currentTimeMillis())
             .put("upload_status", "ok")
+            .put("pattern_label", command.optString("pattern_label", ""))
+            .put("bracket_label", command.optString("bracket_label", ""))
         if (command.has("angle_deg")) {
             message.put("angle_deg", command.optInt("angle_deg"))
+        }
+        if (settingsJson != null) {
+            message.put(
+                "settings",
+                JSONObject()
+                    .put("manual", settingsJson.optBoolean("manual", settings.manualExposure))
+                    .put("manual_focus", settingsJson.optBoolean("manual_focus", settings.manualFocus))
+                    .put("awb_locked", settingsJson.optBoolean("awb_locked", settings.awbLocked))
+                    .put("exposure_us", settingsJson.optLong("exposure_us", settings.exposureUs))
+                    .put("iso", settingsJson.optInt("iso", settings.iso))
+                    .put(
+                        "focus_diopters",
+                        settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()),
+                    ),
+            )
         }
         webSocket?.send(message.toString())
         setStatus("connected")
@@ -914,6 +948,8 @@ class MainActivity : ComponentActivity() {
             .put("scan_id", command.optString("scan_id", "unknown"))
             .put("pattern_id", command.optInt("pattern_id", -1))
             .put("capture_id", command.optInt("capture_id", -1))
+            .put("pattern_label", command.optString("pattern_label", ""))
+            .put("bracket_label", command.optString("bracket_label", ""))
             .put("error", error)
         if (command.has("angle_deg")) {
             message.put("angle_deg", command.optInt("angle_deg"))

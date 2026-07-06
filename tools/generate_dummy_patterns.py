@@ -55,7 +55,7 @@ def generate(output: Path, count: int, width: int, height: int) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create numbered dummy test patterns.")
     parser.add_argument("--output", default="example_patterns", type=Path)
-    parser.add_argument("--count", default=8, type=int)
+    parser.add_argument("--count", default=22, type=int)
     parser.add_argument("--width", default=1280, type=int)
     parser.add_argument("--height", default=800, type=int)
     return parser.parse_args()
