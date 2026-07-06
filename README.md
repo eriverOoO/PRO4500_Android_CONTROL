@@ -1,4 +1,4 @@
-# PRO4500 Structured-Light Phone Capture System
+# PRO4500 구조광 휴대폰 캡처 시스템
 
 Windows PC에서 PRO4500/LightCrafter 4500 계열 프로젝터 패턴을 표시하고,
 Android 휴대폰 카메라로 각 패턴 이미지를 촬영해 PC로 업로드하는 구조광 캡처 시스템입니다.

@@ -1,74 +1,74 @@
-# PCB 3D Scanning Software Plan
+# PCB 3D 스캔 소프트웨어 계획
 
-## Current State
+## 현재 상태
 
-- `PRO4500.cpp` can show image files from a folder as fullscreen patterns on a selected display.
-- USB control is currently limited to LightCrafter 4500 blue LED current.
-- There is no scan-session layer yet: no camera trigger, no frame naming, no metadata, and no multi-exposure capture loop.
+- `PRO4500.cpp`는 선택한 디스플레이에 폴더 안의 이미지 파일을 전체 화면 패턴으로 표시할 수 있습니다.
+- USB 제어는 현재 LightCrafter 4500의 Blue LED 전류 제어로 제한됩니다.
+- 아직 스캔 세션 계층은 없습니다. 카메라 트리거, 프레임 이름 지정, 메타데이터 기록, 다중 노출 촬영 루프가 포함되어 있지 않습니다.
 
-## Phase 1 Decision: Pattern Sequence
+## 1단계 결정: 패턴 시퀀스
 
-Use this sequence for the first working scan pipeline:
+첫 동작 가능한 스캔 파이프라인에는 다음 시퀀스를 사용합니다.
 
-1. 10 Gray-code patterns, MSB to LSB.
-2. 4 phase-shifting profilometry (PSP) sine patterns at 0, 90, 180, and 270 degrees.
-3. Vertical fringes by default, meaning intensity changes along projector X. This is the usual first choice when the projector is offset beside the camera and height mainly shifts the observed projector X coordinate.
+1. Gray-code 패턴 10장, MSB에서 LSB 순서.
+2. 0도, 90도, 180도, 270도의 4-step phase-shifting profilometry(PSP) 사인 패턴.
+3. 기본값은 세로 줄무늬입니다. 즉, 프로젝터 X 방향으로 밝기가 변합니다. 프로젝터가 카메라 옆으로 오프셋되어 있고 높이 변화가 주로 관측된 프로젝터 X 좌표를 이동시키는 구성에서 일반적으로 먼저 선택하는 방식입니다.
 
-This exactly matches the 14-image set in the manual:
+이 구성은 매뉴얼의 14장 이미지 세트와 정확히 일치합니다.
 
 ```text
-10 Gray Code + 4-step PSP = 14 projected patterns per exposure set
+10 Gray Code + 4-step PSP = 노출 세트당 투영 패턴 14장
 ```
 
-For HDR capture, run the same 14 patterns for each exposure set:
+HDR 촬영에서는 각 노출 세트마다 같은 14개 패턴을 반복합니다.
 
 ```text
-10 ms exposure -> 14 frames
-30 ms exposure -> 14 frames
-80 ms exposure -> 14 frames
-Total: 42 raw frames per angle
+10 ms 노출 -> 14프레임
+30 ms 노출 -> 14프레임
+80 ms 노출 -> 14프레임
+합계: 각도당 원본 프레임 42장
 ```
 
-The default generator uses 912 x 1140 because that is the LightCrafter 4500 native DMD resolution. If Windows exposes the projector as a different display resolution, generate patterns at that display resolution to avoid scaling artifacts.
+기본 생성기는 LightCrafter 4500의 네이티브 DMD 해상도에 맞춰 `912 x 1140`을 사용합니다. Windows에서 프로젝터가 다른 디스플레이 해상도로 인식된다면, 스케일링 아티팩트를 피하기 위해 해당 디스플레이 해상도로 패턴을 생성합니다.
 
-## Phase 2: Synchronous Capture Loop
+## 2단계: 동기식 촬영 루프
 
-For the first implementation, keep timing simple and explicit:
+첫 구현에서는 타이밍을 단순하고 명확하게 유지합니다.
 
 ```text
-show pattern
+패턴 표시
 sleep(settle_ms)
-flush stale camera frames
-capture frame
-save frame + metadata
-repeat
+이전 카메라 프레임 비우기
+프레임 촬영
+프레임과 메타데이터 저장
+반복
 ```
 
-This is not hardware-locked synchronization, but it is enough to validate:
+이 방식은 하드웨어 잠금 동기화는 아니지만, 다음 항목을 검증하기에는 충분합니다.
 
-- pattern order
-- image brightness
-- camera focus
-- cross-polarization setting
-- basic Gray/PSP decoding feasibility
+- 패턴 순서
+- 이미지 밝기
+- 카메라 초점
+- 교차 편광 설정
+- 기본 Gray/PSP 디코딩 가능성
 
-The `tools/run_scan_sequence.py` script supports webcam indexes such as `0` and smartphone/IP camera URLs such as `http://.../video`, as long as OpenCV can open them.
+`tools/run_scan_sequence.py` 스크립트는 OpenCV가 열 수 있는 입력이라면 `0` 같은 웹캠 인덱스와 `http://.../video` 같은 스마트폰/IP 카메라 URL을 지원합니다.
 
-Install the capture dependency in the Python environment you will use:
+사용할 Python 환경에 촬영 의존성을 설치합니다.
 
 ```powershell
 python -m pip install -r tools\requirements.txt
 ```
 
-Important camera note:
+카메라 관련 중요 참고:
 
-- Webcam exposure control through OpenCV is backend-dependent.
-- Smartphone cameras usually do not expose shutter control through a plain video URL.
-- For reliable HDR sets, use a camera app/driver/API that can lock manual exposure, then confirm the saved frames actually differ in brightness.
+- OpenCV를 통한 웹캠 노출 제어는 백엔드에 따라 동작이 달라집니다.
+- 스마트폰 카메라는 보통 일반 동영상 URL만으로 셔터 제어를 노출하지 않습니다.
+- 안정적인 HDR 세트를 얻으려면 수동 노출을 고정할 수 있는 카메라 앱, 드라이버, API를 사용하고 저장된 프레임의 밝기가 실제로 달라지는지 확인합니다.
 
-## Phase 3: 0/180 Degree Rotation
+## 3단계: 0도/180도 회전
 
-Software-wise, the first version should treat angles as separate capture blocks:
+소프트웨어 관점에서 첫 버전은 각도를 서로 다른 촬영 블록으로 취급합니다.
 
 ```text
 angle_000/
@@ -81,22 +81,22 @@ angle_180/
   exposure_080ms/
 ```
 
-The script can pause between angles so the rotation disk can be moved manually. Later, a serial motor controller can replace that pause.
+스크립트는 각도 사이에서 일시 정지하여 회전 디스크를 수동으로 움직일 수 있게 합니다. 이후에는 이 일시 정지를 시리얼 모터 컨트롤러로 대체할 수 있습니다.
 
-## Future: USL / Asynchronous Capture
+## 향후: USL / 비동기 촬영
 
-USL should be added only after the synchronous pipeline produces usable Gray/PSP data. The future async design should record:
+USL은 동기식 파이프라인에서 사용 가능한 Gray/PSP 데이터가 나온 뒤에 추가하는 것이 좋습니다. 향후 비동기 설계에서는 다음 정보를 기록해야 합니다.
 
-- projector pattern schedule with monotonic timestamps
-- camera frame timestamps
-- exposure time and gain per frame
-- detected pattern ID, either from image content or a small corner marker
+- 단조 증가 타임스탬프가 포함된 프로젝터 패턴 스케줄
+- 카메라 프레임 타임스탬프
+- 각 프레임의 노출 시간과 게인
+- 이미지 내용 또는 작은 코너 마커로 감지한 패턴 ID
 
-Correction strategy:
+보정 전략:
 
-1. Decode or infer which projected pattern each captured frame belongs to.
-2. Estimate camera latency and frame cadence from timestamp differences.
-3. Reject transition frames captured while patterns were changing.
-4. Rebuild a clean 14-pattern set per exposure from the accepted frames.
+1. 각 촬영 프레임이 어떤 투영 패턴에 해당하는지 디코딩하거나 추론합니다.
+2. 타임스탬프 차이로 카메라 지연 시간과 프레임 간격을 추정합니다.
+3. 패턴이 바뀌는 중에 촬영된 전환 프레임을 제외합니다.
+4. 채택된 프레임으로 노출별 깨끗한 14개 패턴 세트를 다시 구성합니다.
 
-This turns async capture into a software alignment problem instead of assuming each camera frame is already synchronized.
+이렇게 하면 각 카메라 프레임이 이미 동기화되어 있다고 가정하는 대신, 비동기 촬영을 소프트웨어 정렬 문제로 다룰 수 있습니다.

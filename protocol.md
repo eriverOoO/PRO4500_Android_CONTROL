@@ -1,14 +1,14 @@
-# Structured Light Phone Capture Protocol
+# 구조광 휴대폰 캡처 프로토콜
 
-PC is the master. Android never advances the scan sequence by itself.
+PC가 항상 마스터입니다. Android 앱은 스스로 스캔 순서를 다음 단계로 진행하지 않습니다.
 
-## Endpoints
+## 엔드포인트
 
 - WebSocket: `ws://<pc_ip>:8765/ws`
-- Upload: `http://<pc_ip>:8765/upload`
-- Health: `GET http://<pc_ip>:8765/health`
+- 업로드: `http://<pc_ip>:8765/upload`
+- 상태 확인: `GET http://<pc_ip>:8765/health`
 
-## WebSocket: PC to Android
+## WebSocket: PC에서 Android로
 
 ### `ping`
 
@@ -18,7 +18,7 @@ PC is the master. Android never advances the scan sequence by itself.
 }
 ```
 
-Android replies with `pong`.
+Android는 `pong`으로 응답합니다.
 
 ### `capture`
 
@@ -51,23 +51,23 @@ Android replies with `pong`.
 }
 ```
 
-Required fields:
+필수 필드:
 
-- `type`: must be `capture`
-- `scan_id`: stable ID for one scan
-- `pattern_id`: zero-based pattern index within the pattern folder
-- `capture_id`: globally unique capture number for this scan
-- `upload_url`: PC HTTP upload endpoint
-- `settings`: camera settings requested by PC
+- `type`: 반드시 `capture`여야 합니다.
+- `scan_id`: 하나의 스캔을 식별하는 고정 ID입니다.
+- `pattern_id`: 패턴 폴더 안에서 0부터 시작하는 패턴 번호입니다.
+- `capture_id`: 해당 스캔 안에서 전역으로 고유한 촬영 번호입니다.
+- `upload_url`: PC의 HTTP 업로드 엔드포인트입니다.
+- `settings`: PC가 요청하는 카메라 촬영 설정입니다.
 
-Optional fields:
+선택 필드:
 
-- `angle_deg`: rotation angle label
-- `attempt`: retry attempt number
-- `pattern_label`: decoder-contract label such as `Gray0_inv`
-- `bracket_label` and `bracket`: HDR exposure bracket metadata
+- `angle_deg`: 회전 각도 라벨입니다.
+- `attempt`: 재시도 횟수입니다.
+- `pattern_label`: `Gray0_inv`처럼 디코더와 약속한 패턴 라벨입니다.
+- `bracket_label`과 `bracket`: HDR 노출 브라켓 메타데이터입니다.
 
-## WebSocket: Android to PC
+## WebSocket: Android에서 PC로
 
 ### `pong`
 
@@ -80,7 +80,7 @@ Optional fields:
 
 ### `capture_done`
 
-Android sends this only after the HTTP upload succeeds.
+Android는 HTTP 업로드가 성공한 뒤에만 이 메시지를 보냅니다.
 
 ```json
 {
@@ -118,25 +118,25 @@ Android sends this only after the HTTP upload succeeds.
 }
 ```
 
-## HTTP Upload
+## HTTP 업로드
 
 `POST /upload`
 
-Content type: `multipart/form-data`
+콘텐츠 타입: `multipart/form-data`
 
-Fields:
+필드:
 
-- `scan_id`: string
-- `pattern_id`: integer
-- `capture_id`: integer
-- `angle_deg`: optional integer
-- `bracket_label`: optional HDR bracket label
-- `exposure_us`: optional camera exposure metadata
-- `iso`: optional camera sensitivity metadata
-- `focus_diopters`: optional focus metadata
-- `file`: PNG image file
+- `scan_id`: 문자열
+- `pattern_id`: 정수
+- `capture_id`: 정수
+- `angle_deg`: 선택 정수값
+- `bracket_label`: 선택 HDR 브라켓 라벨
+- `exposure_us`: 선택 카메라 노출 메타데이터
+- `iso`: 선택 카메라 감도 메타데이터
+- `focus_diopters`: 선택 초점 메타데이터
+- `file`: PNG 이미지 파일
 
-In the HDR workflow PC stores raw bracket files as:
+HDR 워크플로에서 PC는 원본 브라켓 파일을 다음 구조로 저장합니다.
 
 ```text
 exposures/pattern_000/short.png
@@ -144,35 +144,35 @@ exposures/pattern_000/mid.png
 exposures/pattern_000/long.png
 ```
 
-and writes the decoder input image as:
+그리고 디코더 입력 이미지는 다음 파일로 기록합니다.
 
 ```text
 pattern_000.png
 ```
 
-The legacy single-upload fallback stores the file as:
+기존 단일 업로드 대체 경로에서는 파일을 다음 형식으로 저장합니다.
 
 ```text
 <scan_id>[_angle_000]_pattern_000_capture_000.png
 ```
 
-## Synchronization Rule
+## 동기화 규칙
 
-For each pattern, the PC waits for both:
+각 패턴에서 PC는 다음 두 조건을 모두 기다립니다.
 
-1. HTTP `/upload` has saved the image to disk.
-2. WebSocket `capture_done` has arrived for the same `(scan_id, pattern_id, capture_id)`.
+1. HTTP `/upload`가 이미지를 디스크에 저장했습니다.
+2. 같은 `(scan_id, pattern_id, capture_id)`에 대한 WebSocket `capture_done`이 도착했습니다.
 
-Only then may the PC display the next pattern.
+두 조건이 모두 만족된 뒤에만 PC는 다음 패턴을 표시할 수 있습니다.
 
-If `capture_error` or timeout occurs, PC retries the same `pattern_id` with a new `capture_id`. After the configured retry limit, the scan aborts.
+`capture_error` 또는 타임아웃이 발생하면 PC는 같은 `pattern_id`를 새 `capture_id`로 다시 시도합니다. 설정된 재시도 한도를 넘으면 스캔을 중단합니다.
 
-## Filename Rule
+## 파일명 규칙
 
-Every image filename must include:
+모든 이미지 파일명에는 다음 값이 포함되어야 합니다.
 
 - `scan_id`
 - `pattern_id`
 - `capture_id`
 
-`angle_deg` is included when the PC sends it.
+PC가 `angle_deg`를 보낸 경우에는 파일명에도 이 값을 포함합니다.
