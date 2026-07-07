@@ -27,6 +27,10 @@
 !GUI/hidapi-master/LICENSE*.txt
 !GUI/hidapi-master/README.txt
 !GUI/hidapi-master/linux/README.txt
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
 # Python virtual environments and caches
 .venv/
 .venv-pc/
@@ -43,7 +47,11 @@ patterns/
 scans/
 captures/
 example_patterns/
+generated_patterns/
+projection_runs/
+build/
 dist/
+.runtime/
 .toolchains/
 android/**/.gradle/
 android/**/build/
