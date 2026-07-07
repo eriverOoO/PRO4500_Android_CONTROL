@@ -6,6 +6,17 @@ Android 휴대폰 카메라로 각 패턴 이미지를 촬영해 PC로 업로드
 현재 기준의 주 실행 경로는 `StructuredLightControlPanel.exe` GUI입니다.
 GUI는 Python PC 컨트롤러를 실행하고, Android 앱 연결 URL을 보여주며, 멀티 각도 촬영의 `Next Angle` 신호와 DLPC350 Blue LED 제어를 제공합니다.
 
+## 출처 및 공통 모듈
+
+이 작업 공간의 초기 PRO4500/LightCrafter 4500 제어 뼈대는
+[lee-lab-skku/PRO4500_Control_System](https://github.com/lee-lab-skku/PRO4500_Control_System)을
+바탕으로 확장되었습니다.
+
+두 작업 공간에서 공통으로 사용하는 LightCrafter 4500/DLPC350 라이트엔진
+제어 코드는 [eriverOoO/PRO4500_CONTROL](https://github.com/eriverOoO/PRO4500_CONTROL)
+저장소로 분리했고, 이 저장소에서는 `GUI/` 경로의 Git submodule로 참조합니다.
+Android 휴대폰 카메라 연동과 스캔 워크플로 코드는 이 작업 공간에 남겨 둡니다.
+
 ## 직접 조작하는 프로그램
 
 촬영 중 사용자가 직접 다루는 프로그램은 PC 쪽 제어 프로그램과 Android 촬영 앱입니다.
