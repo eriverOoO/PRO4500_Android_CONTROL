@@ -45,6 +45,7 @@ enum ControlId {
     IDC_WINDOWED,
     IDC_STRETCH,
     IDC_PAUSE_FIRST,
+    IDC_BIDIRECTIONAL_ANALYSIS,
     IDC_LOG,
     IDC_START,
     IDC_STOP,
@@ -80,6 +81,7 @@ struct AppState {
     HWND windowed{};
     HWND stretch{};
     HWND pauseFirst{};
+    HWND bidirectionalAnalysis{};
     HWND log{};
     HWND start{};
     HWND stop{};
@@ -396,6 +398,8 @@ std::wstring build_scan_command() {
         << L" --iso " << quote(get_text(g_app.iso))
         << L" --focus-diopters " << quote(get_text(g_app.focus))
         << L" --angles " << quote(get_text(g_app.angles))
+        << L" --analysis-mode "
+        << quote(SendMessageW(g_app.bidirectionalAnalysis, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"bidirectional" : L"single")
         << L" --angle-advance-file " << quote(g_app.angleAdvanceFile)
         << L" --manual " << checkbox_arg(g_app.manual);
 
@@ -574,7 +578,7 @@ void build_ui(HWND hwnd) {
     make_label(hwnd, L"Monitor", 590, y + 4, 60, 22);
     g_app.monitor = make_edit(hwnd, IDC_MONITOR, L"1", 655, y, 60, 24);
     make_label(hwnd, L"Angles", 740, y + 4, 55, 22);
-    g_app.angles = make_edit(hwnd, IDC_ANGLES, L"0", 795, y, 145, 24);
+    g_app.angles = make_edit(hwnd, IDC_ANGLES, L"0,180", 795, y, 145, 24);
 
     y += 34;
     make_label(hwnd, L"Settle ms", margin, y + 4, 75, 22);
@@ -591,6 +595,7 @@ void build_ui(HWND hwnd) {
     g_app.windowed = make_checkbox(hwnd, IDC_WINDOWED, L"Windowed projection", 190, y, 170, 24, false);
     g_app.stretch = make_checkbox(hwnd, IDC_STRETCH, L"Stretch patterns", 385, y, 140, 24, false);
     g_app.pauseFirst = make_checkbox(hwnd, IDC_PAUSE_FIRST, L"Pause before first angle", 550, y, 190, 24, false);
+    g_app.bidirectionalAnalysis = make_checkbox(hwnd, IDC_BIDIRECTIONAL_ANALYSIS, L"Bidirectional analysis", 750, y, 190, 24, true);
 
     y += 42;
     g_app.start = make_button(hwnd, IDC_START, L"Start Scan", margin, y, 120, 32);

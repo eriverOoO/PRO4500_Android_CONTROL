@@ -37,6 +37,24 @@ def camera_source(value: str):
     return int(value) if re.fullmatch(r"\d+", value) else value
 
 
+def pattern_id(pattern: dict, fallback: int) -> int:
+    value = pattern.get("pattern_id", pattern.get("index", fallback))
+    return int(value)
+
+
+def selected_analysis_angles(args: argparse.Namespace, angles: list[int]) -> list[int]:
+    if args.analysis_mode == "bidirectional":
+        return list(angles)
+    selected = angles[0]
+    if args.single_analysis_angle is not None:
+        if args.single_analysis_angle not in angles:
+            raise SystemExit(
+                f"--single-analysis-angle {args.single_analysis_angle} is not in --angles"
+            )
+        selected = args.single_analysis_angle
+    return [selected]
+
+
 def set_camera_exposure(cv2, cap, exposure_ms: int, mode: str) -> dict:
     if mode == "none":
         return {"requested_ms": exposure_ms, "mode": mode, "applied": False}
@@ -118,6 +136,7 @@ def run_sequence(args: argparse.Namespace) -> int:
 
     exposures = parse_csv_ints(args.exposures, "exposures")
     angles = parse_csv_ints(args.angles, "angles")
+    analysis_angles = selected_analysis_angles(args, angles)
     metadata = {
         "session_id": session_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -125,6 +144,9 @@ def run_sequence(args: argparse.Namespace) -> int:
         "camera": args.camera,
         "exposures_ms": exposures,
         "angles_deg": angles,
+        "analysis_mode": args.analysis_mode,
+        "analysis_angles_deg": analysis_angles,
+        "pattern_count": len(patterns),
         "settle_ms": args.settle_ms,
         "flush_frames": args.flush_frames,
         "exposure_control": args.exposure_control,
@@ -144,7 +166,8 @@ def run_sequence(args: argparse.Namespace) -> int:
                     )
                     time.sleep(args.exposure_settle_ms / 1000.0)
 
-                for pattern in patterns:
+                for sequence_index, pattern in enumerate(patterns):
+                    current_pattern_id = pattern_id(pattern, sequence_index)
                     image_path = pattern_dir / pattern["filename"]
                     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                     if image is None:
@@ -155,7 +178,7 @@ def run_sequence(args: argparse.Namespace) -> int:
                         return 130
 
                     capture_name = (
-                        f"{pattern['index']:02d}_{Path(pattern['filename']).stem}.png"
+                        f"{current_pattern_id:02d}_{Path(pattern['filename']).stem}.png"
                     )
                     rel_capture = (
                         Path(f"angle_{angle:03d}")
@@ -174,7 +197,12 @@ def run_sequence(args: argparse.Namespace) -> int:
                     metadata["captures"].append(
                         {
                             "angle_deg": angle,
+                            "angle_index": angle_index,
+                            "angle_count": len(angles),
                             "exposure_ms": exposure_ms,
+                            "pattern_sequence_index": sequence_index,
+                            "pattern_count": len(patterns),
+                            "pattern_id": current_pattern_id,
                             "pattern": pattern,
                             "capture": str(rel_capture) if cap is not None else None,
                             "timestamp": time.monotonic(),
@@ -184,11 +212,32 @@ def run_sequence(args: argparse.Namespace) -> int:
                     )
                     print(
                         f"angle={angle:03d} exposure={exposure_ms:03d}ms "
-                        f"pattern={pattern['index']:02d} saved={saved}"
+                        f"pattern={sequence_index + 1:02d}/{len(patterns):02d} "
+                        f"id={current_pattern_id:02d} saved={saved}"
                     )
     finally:
         (session_dir / "metadata.json").write_text(
             json.dumps(metadata, indent=2), encoding="utf-8"
+        )
+        (session_dir / "analysis_manifest.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "analysis_mode": args.analysis_mode,
+                    "analysis_angles_deg": analysis_angles,
+                    "capture_angles_deg": angles,
+                    "targets": [
+                        {
+                            "angle_deg": angle,
+                            "relative_decode_dir": f"angle_{angle:03d}",
+                            "pattern_count": len(patterns),
+                        }
+                        for angle in analysis_angles
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
         )
         if cap is not None:
             cap.release()
@@ -202,11 +251,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Display FPP patterns and capture one camera frame per pattern."
     )
-    parser.add_argument("--sequence", default="patterns/fpp_14/sequence.json", type=Path)
+    parser.add_argument("--sequence", default="generated_patterns/sequence.json", type=Path)
     parser.add_argument("--camera", default="0", help="Webcam index or camera URL.")
     parser.add_argument("--output", default="scans", type=Path)
     parser.add_argument("--exposures", default="10,30,80")
-    parser.add_argument("--angles", default="0")
+    parser.add_argument("--angles", default="0,180")
+    parser.add_argument(
+        "--analysis-mode",
+        default="bidirectional",
+        choices=("single", "bidirectional"),
+    )
+    parser.add_argument("--single-analysis-angle", type=int)
     parser.add_argument("--settle-ms", default=120, type=int)
     parser.add_argument("--exposure-settle-ms", default=250, type=int)
     parser.add_argument("--flush-frames", default=2, type=int)
@@ -237,4 +292,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

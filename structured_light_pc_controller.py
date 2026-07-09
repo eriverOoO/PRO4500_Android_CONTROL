@@ -330,7 +330,10 @@ def build_hdr_settings(args: argparse.Namespace) -> HdrSettings:
     if dark_threshold >= saturated_threshold:
         raise SystemExit("dark threshold must be lower than saturated threshold")
 
-    if args.legacy_single_exposure:
+    hdr_requested = bool(args.enable_hdr or args.hdr_brackets or args.bracket_config)
+    single_exposure_requested = args.single_exposure or args.legacy_single_exposure
+
+    if single_exposure_requested or not hdr_requested:
         brackets = (
             ExposureBracket(
                 label="single",
@@ -396,6 +399,10 @@ class PendingCapture:
     attempt: int
     result_future: asyncio.Future
     pattern_label: str = ""
+    pattern_sequence_index: int = 0
+    pattern_count: int = 0
+    angle_index: int = 0
+    angle_count: int = 0
     bracket_label: str = ""
     bracket_index: int = 0
     exposure_us: int | None = None
@@ -479,6 +486,10 @@ class ControllerState:
         angle_deg: int,
         attempt: int,
         pattern_label: str = "",
+        pattern_sequence_index: int = 0,
+        pattern_count: int = 0,
+        angle_index: int = 0,
+        angle_count: int = 0,
         bracket_label: str = "",
         bracket_index: int = 0,
         exposure_us: int | None = None,
@@ -495,6 +506,10 @@ class ControllerState:
             attempt=attempt,
             result_future=future,
             pattern_label=pattern_label,
+            pattern_sequence_index=pattern_sequence_index,
+            pattern_count=pattern_count,
+            angle_index=angle_index,
+            angle_count=angle_count,
             bracket_label=bracket_label,
             bracket_index=bracket_index,
             exposure_us=exposure_us,
@@ -570,6 +585,10 @@ def create_app(state: ControllerState) -> FastAPI:
         pattern_id: int = Form(...),
         capture_id: int = Form(...),
         angle_deg: int | None = Form(None),
+        pattern_sequence_index: int | None = Form(None),
+        pattern_count: int | None = Form(None),
+        angle_index: int | None = Form(None),
+        angle_count: int | None = Form(None),
         bracket_label: str | None = Form(None),
         exposure_us: int | None = Form(None),
         iso: int | None = Form(None),
@@ -618,6 +637,12 @@ def create_app(state: ControllerState) -> FastAPI:
             "pattern_id": pattern_id,
             "capture_id": capture_id,
             "angle_deg": angle_deg,
+            "pattern_sequence_index": (
+                pending.pattern_sequence_index if pending else pattern_sequence_index
+            ),
+            "pattern_count": pending.pattern_count if pending else pattern_count,
+            "angle_index": pending.angle_index if pending else angle_index,
+            "angle_count": pending.angle_count if pending else angle_count,
             "filename": filename,
             "path": str(destination),
             "relative_path": rel_posix(destination, scan_dir),
@@ -756,10 +781,14 @@ def make_capture_message(
     *,
     scan_id: str,
     pattern: PatternSpec,
+    pattern_sequence_index: int,
+    pattern_count: int,
     bracket: ExposureBracket,
     bracket_index: int,
     capture_id: int,
     angle_deg: int,
+    angle_index: int,
+    angle_count: int,
     attempt: int,
     upload_url: str,
 ) -> dict[str, Any]:
@@ -768,8 +797,12 @@ def make_capture_message(
         "scan_id": scan_id,
         "pattern_id": pattern.pattern_id,
         "pattern_label": pattern.label,
+        "pattern_sequence_index": pattern_sequence_index,
+        "pattern_count": pattern_count,
         "capture_id": capture_id,
         "angle_deg": angle_deg,
+        "angle_index": angle_index,
+        "angle_count": angle_count,
         "attempt": attempt,
         "upload_url": upload_url,
         "bracket_label": bracket.label,
@@ -844,8 +877,12 @@ def append_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "scan_id",
         "angle_deg",
+        "angle_index",
+        "angle_count",
         "pattern_id",
         "pattern_label",
+        "pattern_sequence_index",
+        "pattern_count",
         "bracket_label",
         "bracket_index",
         "capture_id",
@@ -986,6 +1023,10 @@ def merge_hdr_pattern(
                 "exposure_us": record.get("exposure_us"),
                 "iso": record.get("iso"),
                 "focus_diopters": record.get("focus_diopters"),
+                "angle_index": record.get("angle_index"),
+                "angle_count": record.get("angle_count"),
+                "pattern_sequence_index": record.get("pattern_sequence_index"),
+                "pattern_count": record.get("pattern_count"),
                 "capture_id": record.get("capture_id"),
                 "capture_command_timestamp_pc_ms": record.get(
                     "capture_command_timestamp_pc_ms"
@@ -1049,6 +1090,56 @@ def validate_decode_folder(decode_dir: Path, expected_ids: tuple[int, ...]) -> N
     raise RuntimeError(f"Decode folder {decode_dir} is missing pattern ids: {missing_text}")
 
 
+def select_analysis_angles(args: argparse.Namespace, angles: list[int]) -> list[int]:
+    if args.analysis_mode == "bidirectional":
+        return list(angles)
+
+    selected = angles[0]
+    if args.single_analysis_angle is not None:
+        if args.single_analysis_angle not in angles:
+            raise SystemExit(
+                f"--single-analysis-angle {args.single_analysis_angle} is not in --angles"
+            )
+        selected = args.single_analysis_angle
+    return [selected]
+
+
+def build_analysis_manifest(
+    *,
+    args: argparse.Namespace,
+    scan_id: str,
+    scan_dir: Path,
+    angles: list[int],
+    decode_records: dict[str, list[dict[str, Any]]],
+    expected_ids: tuple[int, ...],
+) -> dict[str, Any]:
+    analysis_angles = select_analysis_angles(args, angles)
+    targets: list[dict[str, Any]] = []
+    for angle in analysis_angles:
+        decode_dir = decode_dir_for_angle(scan_dir, angles, angle)
+        records = decode_records.get(str(decode_dir), [])
+        targets.append(
+            {
+                "angle_deg": angle,
+                "decode_dir": str(decode_dir),
+                "relative_decode_dir": rel_posix(decode_dir, scan_dir)
+                if decode_dir != scan_dir
+                else ".",
+                "pattern_count": len(records),
+                "expected_pattern_ids": list(expected_ids),
+            }
+        )
+
+    return {
+        "scan_id": scan_id,
+        "analysis_mode": args.analysis_mode,
+        "analysis_angles_deg": analysis_angles,
+        "capture_angles_deg": angles,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "targets": targets,
+    }
+
+
 def make_synthetic_capture(
     *,
     pattern: PatternSpec,
@@ -1076,6 +1167,7 @@ async def run_scan(args: argparse.Namespace) -> int:
     scan_dir.mkdir(parents=True, exist_ok=True)
     expected_ids = expected_pattern_ids(args.pattern_mode)
     angles = parse_csv_ints(args.angles, "angles")
+    select_analysis_angles(args, angles)
     hdr_settings = build_hdr_settings(args)
 
     scan_rows: list[dict[str, Any]] = []
@@ -1090,7 +1182,9 @@ async def run_scan(args: argparse.Namespace) -> int:
 
     print(
         f"[scan] scan_id={scan_id} mode={args.pattern_mode} "
-        f"patterns={len(capture_patterns)} angles={angles} dry_run={args.dry_run}"
+        f"patterns={len(capture_patterns)} raw_captures_per_angle="
+        f"{len(capture_patterns) * len(hdr_settings.brackets)} "
+        f"angles={angles} analysis={args.analysis_mode} dry_run={args.dry_run}"
     )
     print(
         "[scan] HDR brackets="
@@ -1106,7 +1200,9 @@ async def run_scan(args: argparse.Namespace) -> int:
     def make_base_row(
         *,
         angle: int,
+        angle_index: int,
         pattern: PatternSpec,
+        pattern_sequence_index: int,
         bracket: ExposureBracket,
         bracket_index: int,
         current_capture_id: int,
@@ -1117,8 +1213,12 @@ async def run_scan(args: argparse.Namespace) -> int:
         return {
             "scan_id": scan_id,
             "angle_deg": angle,
+            "angle_index": angle_index,
+            "angle_count": len(angles),
             "pattern_id": pattern.pattern_id,
             "pattern_label": pattern.label,
+            "pattern_sequence_index": pattern_sequence_index,
+            "pattern_count": len(capture_patterns),
             "bracket_label": bracket.label,
             "bracket_index": bracket_index,
             "capture_id": current_capture_id,
@@ -1152,11 +1252,11 @@ async def run_scan(args: argparse.Namespace) -> int:
 
     try:
         if args.dry_run:
-            for angle in angles:
+            for angle_index, angle in enumerate(angles):
                 decode_dir = decode_dir_for_angle(scan_dir, angles, angle)
                 decode_dir.mkdir(parents=True, exist_ok=True)
                 print(f"[dry-run] angle={angle:03d} decode_dir={decode_dir}")
-                for pattern in capture_patterns:
+                for pattern_sequence_index, pattern in enumerate(capture_patterns):
                     bracket_records: list[dict[str, Any]] = []
                     for bracket_index, bracket in enumerate(hdr_settings.brackets):
                         display_ts = now_ms()
@@ -1176,7 +1276,9 @@ async def run_scan(args: argparse.Namespace) -> int:
                         upload_ts = now_ms()
                         row = make_base_row(
                             angle=angle,
+                            angle_index=angle_index,
                             pattern=pattern,
+                            pattern_sequence_index=pattern_sequence_index,
                             bracket=bracket,
                             bracket_index=bracket_index,
                             current_capture_id=capture_id,
@@ -1279,7 +1381,7 @@ async def run_scan(args: argparse.Namespace) -> int:
                             f"Set rotation stage to {angle} degrees, then press Enter...",
                         )
 
-                for pattern in capture_patterns:
+                for pattern_sequence_index, pattern in enumerate(capture_patterns):
                     image = read_image(pattern.path)
                     bracket_records: list[dict[str, Any]] = []
 
@@ -1305,6 +1407,10 @@ async def run_scan(args: argparse.Namespace) -> int:
                                 angle_deg=angle,
                                 attempt=attempt,
                                 pattern_label=pattern.label,
+                                pattern_sequence_index=pattern_sequence_index,
+                                pattern_count=len(capture_patterns),
+                                angle_index=angle_index,
+                                angle_count=len(angles),
                                 bracket_label=bracket.label,
                                 bracket_index=bracket_index,
                                 exposure_us=bracket.exposure_us,
@@ -1316,10 +1422,14 @@ async def run_scan(args: argparse.Namespace) -> int:
                                 args,
                                 scan_id=scan_id,
                                 pattern=pattern,
+                                pattern_sequence_index=pattern_sequence_index,
+                                pattern_count=len(capture_patterns),
                                 bracket=bracket,
                                 bracket_index=bracket_index,
                                 capture_id=capture_id,
                                 angle_deg=angle,
+                                angle_index=angle_index,
+                                angle_count=len(angles),
                                 attempt=attempt,
                                 upload_url=upload_url,
                             )
@@ -1334,7 +1444,9 @@ async def run_scan(args: argparse.Namespace) -> int:
 
                             row = make_base_row(
                                 angle=angle,
+                                angle_index=angle_index,
                                 pattern=pattern,
+                                pattern_sequence_index=pattern_sequence_index,
                                 bracket=bracket,
                                 bracket_index=bracket_index,
                                 current_capture_id=capture_id,
@@ -1443,6 +1555,15 @@ async def run_scan(args: argparse.Namespace) -> int:
                 validation_error = str(exc)
                 print(f"[scan] ERROR: {validation_error}")
 
+        analysis_manifest = build_analysis_manifest(
+            args=args,
+            scan_id=scan_id,
+            scan_dir=scan_dir,
+            angles=angles,
+            decode_records=decode_records,
+            expected_ids=expected_ids,
+        )
+
         log = {
             "scan_id": scan_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1461,6 +1582,7 @@ async def run_scan(args: argparse.Namespace) -> int:
             "expected_pattern_ids": list(expected_ids),
             "decode_folders": sorted(decode_records),
             "angles_deg": angles,
+            "analysis": analysis_manifest,
             "scan_type": args.scan_type,
             "metadata": {
                 "scan_type": args.scan_type,
@@ -1515,6 +1637,10 @@ async def run_scan(args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
         write_decode_logs(scan_dir=scan_dir, decode_records=decode_records, base_log=log)
+        (scan_dir / "analysis_manifest.json").write_text(
+            json.dumps(analysis_manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         append_csv(scan_dir / "scan_log.csv", scan_rows)
         print(f"[scan] log saved: {scan_dir / 'scan_log.json'}")
         print(f"[scan] csv saved: {scan_dir / 'scan_log.csv'}")
@@ -1582,8 +1708,13 @@ def parse_args() -> argparse.Namespace:
         "--hdr-brackets",
         help=(
             "Comma-separated label:exposure_us[:iso] list. "
-            "Default derives short/mid/long from --exposure-us and --iso."
+            "Enables HDR capture and overrides default short/mid/long brackets."
         ),
+    )
+    parser.add_argument(
+        "--enable-hdr",
+        action="store_true",
+        help="Capture HDR short/mid/long brackets per pattern instead of one frame.",
     )
     parser.add_argument(
         "--bracket-config",
@@ -1596,7 +1727,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--legacy-single-exposure",
         action="store_true",
-        help="Capture one exposure per pattern and still write decoder-format files.",
+        help="Compatibility alias for the default single-exposure 22-frame workflow.",
+    )
+    parser.add_argument(
+        "--single-exposure",
+        action="store_true",
+        help="Force one exposure per pattern even when HDR options are present.",
     )
     parser.add_argument("--scan-type", default="object", choices=("object", "reference"))
     parser.add_argument("--projector-tilt-deg", default=30.0, type=float)
@@ -1605,7 +1741,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rig-id", default="")
     parser.add_argument("--calibration-id", default="")
     parser.add_argument("--projector-brightness", default="")
-    parser.add_argument("--angles", default="0")
+    parser.add_argument("--angles", default="0,180")
+    parser.add_argument(
+        "--analysis-mode",
+        default="bidirectional",
+        choices=("single", "bidirectional"),
+        help="Choose whether downstream analysis uses one angle or all captured angles.",
+    )
+    parser.add_argument(
+        "--single-analysis-angle",
+        type=int,
+        help="Angle to analyze when --analysis-mode single. Defaults to the first angle.",
+    )
     parser.add_argument("--pause-before-first-angle", action="store_true")
     parser.add_argument("--no-angle-prompt", action="store_true")
     parser.add_argument("--angle-advance-file", type=Path)

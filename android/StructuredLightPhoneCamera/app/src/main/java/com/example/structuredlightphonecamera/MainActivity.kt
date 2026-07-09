@@ -698,6 +698,7 @@ class MainActivity : ComponentActivity() {
         val patternId = command.getInt("pattern_id")
         val captureId = command.getInt("capture_id")
         val settingsJson = command.optJSONObject("settings")
+        val progress = captureProgressText(command, patternId)
 
         if (settingsJson != null && settings.usePcSettings) {
             val newSettings = settings.copy(
@@ -720,8 +721,8 @@ class MainActivity : ComponentActivity() {
         val settleMs = settingsJson?.optLong("settle_ms_before_capture", 0L) ?: 0L
         val bracketLabel = command.optString("bracket_label", "")
         setStatus("capturing")
-        setRecent("recent command: scan=$scanId pattern=$patternId bracket=$bracketLabel capture=$captureId")
-        appendLog("Capture command scan=$scanId pattern=$patternId bracket=$bracketLabel capture=$captureId settle=${settleMs}ms")
+        setRecent("recent command: scan=$scanId $progress bracket=$bracketLabel capture=$captureId")
+        appendLog("Capture command scan=$scanId $progress bracket=$bracketLabel capture=$captureId settle=${settleMs}ms")
 
         previewView.postDelayed(
             {
@@ -744,16 +745,21 @@ class MainActivity : ComponentActivity() {
         val patternId = command.getInt("pattern_id")
         val captureId = command.getInt("capture_id")
         val angle = if (command.has("angle_deg")) command.optInt("angle_deg") else null
-        val anglePart = angle?.let { "_angle_%03d".format(Locale.US, it) } ?: ""
-        val filename = "%s%s_pattern_%03d_capture_%03d.png".format(
+        val angleDir = angle?.let { "angle_%03d".format(Locale.US, it) } ?: "angle_unknown"
+        val bracketLabel = safeFilenameStem(command.optString("bracket_label", "frame"))
+        val patternLabel = safeFilenameStem(command.optString("pattern_label", "pattern"))
+        val filename = "pattern_%03d_%s_%s_capture_%03d.png".format(
             Locale.US,
-            scanId,
-            anglePart,
             patternId,
+            patternLabel,
+            bracketLabel,
             captureId,
         )
 
-        val captureDir = File(cacheDir, "captures").apply { mkdirs() }
+        val captureDir = File(
+            File(File(cacheDir, "captures"), scanId),
+            "$angleDir/pattern_%03d".format(Locale.US, patternId),
+        ).apply { mkdirs() }
         val outputFile = File(captureDir, filename)
 
         capture.takePicture(
@@ -869,6 +875,10 @@ class MainActivity : ComponentActivity() {
         if (command.has("angle_deg")) {
             bodyBuilder.addFormDataPart("angle_deg", command.optInt("angle_deg").toString())
         }
+        addOptionalIntPart(bodyBuilder, command, "pattern_sequence_index")
+        addOptionalIntPart(bodyBuilder, command, "pattern_count")
+        addOptionalIntPart(bodyBuilder, command, "angle_index")
+        addOptionalIntPart(bodyBuilder, command, "angle_count")
         if (command.has("bracket_label")) {
             bodyBuilder.addFormDataPart("bracket_label", command.optString("bracket_label"))
         }
@@ -918,6 +928,10 @@ class MainActivity : ComponentActivity() {
             .put("upload_status", "ok")
             .put("pattern_label", command.optString("pattern_label", ""))
             .put("bracket_label", command.optString("bracket_label", ""))
+        copyOptionalInt(command, message, "pattern_sequence_index")
+        copyOptionalInt(command, message, "pattern_count")
+        copyOptionalInt(command, message, "angle_index")
+        copyOptionalInt(command, message, "angle_count")
         if (command.has("angle_deg")) {
             message.put("angle_deg", command.optInt("angle_deg"))
         }
@@ -951,11 +965,51 @@ class MainActivity : ComponentActivity() {
             .put("pattern_label", command.optString("pattern_label", ""))
             .put("bracket_label", command.optString("bracket_label", ""))
             .put("error", error)
+        copyOptionalInt(command, message, "pattern_sequence_index")
+        copyOptionalInt(command, message, "pattern_count")
+        copyOptionalInt(command, message, "angle_index")
+        copyOptionalInt(command, message, "angle_count")
         if (command.has("angle_deg")) {
             message.put("angle_deg", command.optInt("angle_deg"))
         }
         webSocket?.send(message.toString())
         setStatus("error")
         appendLog(error)
+    }
+
+    private fun captureProgressText(command: JSONObject, patternId: Int): String {
+        val patternIndex = command.optInt("pattern_sequence_index", patternId)
+        val patternCount = command.optInt("pattern_count", 0)
+        val angle = if (command.has("angle_deg")) command.optInt("angle_deg").toString() else "?"
+        val angleIndex = command.optInt("angle_index", 0)
+        val angleCount = command.optInt("angle_count", 0)
+        val patternText = if (patternCount > 0) {
+            "pattern=${patternIndex + 1}/$patternCount(id=$patternId)"
+        } else {
+            "pattern=$patternId"
+        }
+        val angleText = if (angleCount > 0) {
+            "angle=${angleIndex + 1}/$angleCount(${angle}deg)"
+        } else {
+            "angle=${angle}deg"
+        }
+        return "$angleText $patternText"
+    }
+
+    private fun safeFilenameStem(value: String): String {
+        val sanitized = value.trim().replace(Regex("[^A-Za-z0-9_.-]+"), "_").trim('.', '_')
+        return sanitized.ifEmpty { "frame" }
+    }
+
+    private fun addOptionalIntPart(builder: MultipartBody.Builder, source: JSONObject, key: String) {
+        if (source.has(key)) {
+            builder.addFormDataPart(key, source.optInt(key).toString())
+        }
+    }
+
+    private fun copyOptionalInt(source: JSONObject, destination: JSONObject, key: String) {
+        if (source.has(key)) {
+            destination.put(key, source.optInt(key))
+        }
     }
 }
