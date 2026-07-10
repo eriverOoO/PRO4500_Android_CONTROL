@@ -46,6 +46,8 @@ enum ControlId {
     IDC_STRETCH,
     IDC_PAUSE_FIRST,
     IDC_BIDIRECTIONAL_ANALYSIS,
+    IDC_HDR_ENABLE,
+    IDC_HDR_BRACKETS,
     IDC_LOG,
     IDC_START,
     IDC_STOP,
@@ -82,6 +84,8 @@ struct AppState {
     HWND stretch{};
     HWND pauseFirst{};
     HWND bidirectionalAnalysis{};
+    HWND hdrEnable{};
+    HWND hdrBrackets{};
     HWND log{};
     HWND start{};
     HWND stop{};
@@ -406,6 +410,11 @@ std::wstring build_scan_command() {
     if (SendMessageW(g_app.windowed, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --windowed";
     if (SendMessageW(g_app.stretch, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --stretch";
     if (SendMessageW(g_app.pauseFirst, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --pause-before-first-angle";
+    if (SendMessageW(g_app.hdrEnable, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        cmd << L" --enable-hdr";
+        std::wstring brackets = get_text(g_app.hdrBrackets);
+        if (!brackets.empty()) cmd << L" --hdr-brackets " << quote(brackets);
+    }
     return cmd.str();
 }
 
@@ -589,6 +598,11 @@ void build_ui(HWND hwnd) {
     g_app.iso = make_edit(hwnd, IDC_ISO, L"100", 465, y, 80, 24);
     make_label(hwnd, L"Focus", 575, y + 4, 50, 22);
     g_app.focus = make_edit(hwnd, IDC_FOCUS, L"0.0", 625, y, 90, 24);
+
+    y += 34;
+    g_app.hdrEnable = make_checkbox(hwnd, IDC_HDR_ENABLE, L"Enable HDR", margin, y, 110, 24, false);
+    make_label(hwnd, L"HDR brackets", 130, y + 4, 100, 22);
+    g_app.hdrBrackets = make_edit(hwnd, IDC_HDR_BRACKETS, L"short:3000:100,mid:10000:100,long:30000:100", 230, y, 500, 24);
 
     y += 34;
     g_app.manual = make_checkbox(hwnd, IDC_MANUAL, L"Manual camera mode", margin, y, 160, 24, true);
