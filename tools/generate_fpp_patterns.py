@@ -27,6 +27,13 @@ PROJECTOR_HEIGHT = 800
 
 GRAY_CODE_BITS = 8
 
+# Reflected Gray code naturally makes all non-MSB bit planes black at both
+# image edges. For projector/camera calibration this looks like one black band
+# has been split across the left and right boundaries, so make those edge-split
+# planes white at the boundaries instead. This preserves Gray-code adjacency;
+# decoders should XOR the recorded polarity mask before Gray-to-binary decode.
+AVOID_SPLIT_EDGE_BLACK = True
+
 # BMP is the default because TI/DLP pattern-loading workflows commonly prefer
 # simple, uncompressed bitmap files. Change to "png" if a PNG-only workflow is
 # needed later.
@@ -72,7 +79,20 @@ def validate_config() -> int:
     return stripe_width_px
 
 
-def vertical_gray_pattern(bit_index_from_msb: int, stripe_width_px: int) -> np.ndarray:
+def gray_bit_polarity_mask() -> int:
+    """Return the Gray-code bit mask inverted in generated non-inverted frames."""
+    if not AVOID_SPLIT_EDGE_BLACK:
+        return 0
+
+    # Keep the MSB unflipped: it already has one black half and one white half.
+    return (1 << (GRAY_CODE_BITS - 1)) - 1
+
+
+def vertical_gray_pattern(
+    bit_index_from_msb: int,
+    stripe_width_px: int,
+    polarity_mask: int,
+) -> np.ndarray:
     """Create one vertical-stripe Gray-code bit plane.
 
     The 8-bit Gray code divides projector X into 2**8 absolute-position cells.
@@ -91,7 +111,7 @@ def vertical_gray_pattern(bit_index_from_msb: int, stripe_width_px: int) -> np.n
 
     x = np.arange(PROJECTOR_WIDTH, dtype=np.uint16)
     code_cell = x // stripe_width_px
-    gray = gray_encode(code_cell)
+    gray = gray_encode(code_cell) ^ polarity_mask
 
     row = (((gray >> bit) & 1) * 255).astype(np.uint8)
     return np.repeat(row[np.newaxis, :], PROJECTOR_HEIGHT, axis=0)
@@ -146,6 +166,7 @@ def sequence_record(index: int, label: str, filename: str) -> dict[str, object]:
 
 def generate_patterns() -> list[Path]:
     stripe_width_px = validate_config()
+    polarity_mask = gray_bit_polarity_mask()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if CLEAN_EXISTING_IMAGES:
@@ -172,7 +193,7 @@ def generate_patterns() -> list[Path]:
 
     gray_images: list[np.ndarray] = []
     for gray_index in range(GRAY_CODE_BITS):
-        image = vertical_gray_pattern(gray_index, stripe_width_px)
+        image = vertical_gray_pattern(gray_index, stripe_width_px, polarity_mask)
         gray_images.append(image)
         filename = f"{gray_index + 2:02d}_Gray{gray_index}.{extension}"
         frames.append(
@@ -227,6 +248,8 @@ def generate_patterns() -> list[Path]:
                 "finest_gray_stripe_width_px": stripe_width_px,
                 "sinusoidal_wavelength_px": stripe_width_px,
                 "includes_inverted_gray": INCLUDE_INVERTED_GRAY,
+                "avoid_split_edge_black": AVOID_SPLIT_EDGE_BLACK,
+                "gray_code_polarity_mask": polarity_mask,
             },
             indent=2,
             ensure_ascii=False,
@@ -240,6 +263,7 @@ def generate_patterns() -> list[Path]:
     print(f"Finest Gray stripe width: {stripe_width_px} px")
     print(f"Sinusoidal wavelength: {stripe_width_px} px")
     print(f"Inverted Gray frames: {'yes' if INCLUDE_INVERTED_GRAY else 'no'}")
+    print(f"Gray-code polarity mask: 0x{polarity_mask:0{max(1, (GRAY_CODE_BITS + 3) // 4)}X}")
 
     return written
 
