@@ -1,102 +1,176 @@
 # PCB 3D 스캔 소프트웨어 계획
 
-## 현재 상태
+## 현재 시스템 요약
 
-- `PRO4500.cpp`는 선택한 디스플레이에 폴더 안의 이미지 파일을 전체 화면 패턴으로 표시할 수 있습니다.
-- USB 제어는 현재 LightCrafter 4500의 Blue LED 전류 제어로 제한됩니다.
-- 아직 스캔 세션 계층은 없습니다. 카메라 트리거, 프레임 이름 지정, 메타데이터 기록, 다중 노출 촬영 루프가 포함되어 있지 않습니다.
+현재 스캔 파이프라인은 PC가 전체 촬영 흐름을 제어하는 동기식 구조입니다.
 
-## 1단계 결정: 패턴 시퀀스
+- `StructuredLightControlPanel.exe`는 사용자용 GUI입니다. 패턴 폴더, 저장 폴더, PC IP/포트, 모니터, 노출, ISO, 초점, 각도 옵션을 받아 `structured_light_pc_controller.py`를 실행합니다.
+- `structured_light_pc_controller.py`는 PC 마스터입니다. 패턴을 프로젝터 화면에 표시하고, Android 앱에 WebSocket `capture` 명령을 보낸 뒤, HTTP 업로드와 `capture_done` 응답을 받은 다음 다음 패턴으로 진행합니다.
+- `android/StructuredLightPhoneCamera`는 Android CameraX 기반 촬영 앱입니다. PC가 보낸 설정으로 수동 노출, ISO, 초점, AWB 잠금을 적용하고 PNG 이미지를 PC로 업로드합니다.
+- LightCrafter 4500/DLPC350 USB 제어는 현재 Blue LED 전류 제어와 기본 연결 진단에 사용합니다. 패턴 투영 자체는 Windows 확장 디스플레이에 표시하는 이미지 기반 방식입니다.
+- 결과는 `captures/<scan_id>/` 아래에 저장되며, `scan_log.json`, `scan_log.csv`, 각도별 `analysis_manifest.json`이 생성됩니다.
 
-첫 동작 가능한 스캔 파이프라인에는 다음 시퀀스를 사용합니다.
+## 1단계: 패턴 생성 계약
 
-1. Gray-code 패턴 10장, MSB에서 LSB 순서.
-2. 0도, 90도, 180도, 270도의 4-step phase-shifting profilometry(PSP) 사인 패턴.
-3. 기본값은 세로 줄무늬입니다. 즉, 프로젝터 X 방향으로 밝기가 변합니다. 프로젝터가 카메라 옆으로 오프셋되어 있고 높이 변화가 주로 관측된 프로젝터 X 좌표를 이동시키는 구성에서 일반적으로 먼저 선택하는 방식입니다.
-
-이 구성은 매뉴얼의 14장 이미지 세트와 정확히 일치합니다.
+기본 패턴 세트는 각 촬영 각도마다 22장입니다.
 
 ```text
-10 Gray Code + 4-step PSP = 노출 세트당 투영 패턴 14장
+00 White
+01 Black
+02 Gray0
+03 Gray1
+04 Gray2
+05 Gray3
+06 Gray4
+07 Gray5
+08 Gray6
+09 Gray7
+10 Sine_000
+11 Sine_090
+12 Sine_180
+13 Sine_270
+14 Gray0_inv
+15 Gray1_inv
+16 Gray2_inv
+17 Gray3_inv
+18 Gray4_inv
+19 Gray5_inv
+20 Gray6_inv
+21 Gray7_inv
 ```
 
-HDR 촬영에서는 각 노출 세트마다 같은 14개 패턴을 반복합니다.
+생성 스크립트는 `tools/generate_fpp_patterns.py`입니다.
 
-```text
-10 ms 노출 -> 14프레임
-30 ms 노출 -> 14프레임
-80 ms 노출 -> 14프레임
-합계: 각도당 원본 프레임 42장
+```powershell
+.\.venv-pc\Scripts\python.exe tools\generate_fpp_patterns.py
 ```
 
-기본 생성기는 LightCrafter 4500의 네이티브 DMD 해상도에 맞춰 `912 x 1140`을 사용합니다. Windows에서 프로젝터가 다른 디스플레이 해상도로 인식된다면, 스케일링 아티팩트를 피하기 위해 해당 디스플레이 해상도로 패턴을 생성합니다.
+기본 해상도는 `1280 x 800`, 기본 형식은 BMP입니다. 다른 프로젝터 표시 해상도를 쓰는 경우 실제 Windows 디스플레이 해상도에 맞춰 다시 생성합니다.
 
-## 2단계: 동기식 촬영 루프
+```powershell
+.\.venv-pc\Scripts\python.exe tools\generate_fpp_patterns.py --width 1280 --height 800 --gray-code-bits 8
+```
 
-첫 구현에서는 타이밍을 단순하고 명확하게 유지합니다.
+현재 Gray-code 생성은 8비트 reflected Gray code를 사용합니다. `Gray1..Gray7`의 검정 영역이 좌우 화면 경계에서 반씩 갈라져 보이는 문제를 줄이기 위해, 비반전 Gray 프레임에는 `gray_code_polarity_mask`가 적용됩니다. 이 값은 `generated_patterns/sequence.json`에 기록되며, 향후 디코더는 Gray-to-binary 변환 전에 동일한 polarity mask를 XOR해야 합니다.
+
+기존 14장 구성만 필요할 때는 호환 옵션을 사용합니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe tools\generate_fpp_patterns.py --legacy-14
+```
+
+## 2단계: 동기 촬영 루프
+
+기본 촬영 루프는 다음 순서로 동작합니다.
 
 ```text
 패턴 표시
-sleep(settle_ms)
-이전 카메라 프레임 비우기
-프레임 촬영
-프레임과 메타데이터 저장
-반복
+settle_ms 대기
+Android에 capture 명령 전송
+Android PNG 촬영 및 HTTP 업로드
+Android capture_done 수신
+PC가 파일 저장 및 로그 기록
+다음 패턴으로 진행
 ```
 
-이 방식은 하드웨어 잠금 동기화는 아니지만, 다음 항목을 검증하기에는 충분합니다.
+이 방식은 카메라 프레임을 계속 흘려보내며 나중에 맞추는 구조가 아니라, PC가 한 프레임씩 명령하고 완료 확인을 받은 뒤 진행하는 구조입니다. 따라서 패턴 ID, 캡처 ID, 각도, 브라켓 정보가 PC와 Android 로그에서 같은 컨텍스트로 유지됩니다.
 
-- 패턴 순서
-- 이미지 밝기
-- 카메라 초점
-- 교차 편광 설정
-- 기본 Gray/PSP 디코딩 가능성
-
-`tools/run_scan_sequence.py` 스크립트는 OpenCV가 열 수 있는 입력이라면 `0` 같은 웹캠 인덱스와 `http://.../video` 같은 스마트폰/IP 카메라 URL을 지원합니다.
-
-사용할 Python 환경에 촬영 의존성을 설치합니다.
+기본 실행 예시는 다음과 같습니다.
 
 ```powershell
-python -m pip install -r tools\requirements.txt
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --patterns generated_patterns --output captures --monitor 1 --angles 0,180
 ```
 
-카메라 관련 중요 참고:
+주요 옵션:
 
-- OpenCV를 통한 웹캠 노출 제어는 백엔드에 따라 동작이 달라집니다.
-- 스마트폰 카메라는 보통 일반 동영상 URL만으로 셔터 제어를 노출하지 않습니다.
-- 안정적인 HDR 세트를 얻으려면 수동 노출을 고정할 수 있는 카메라 앱, 드라이버, API를 사용하고 저장된 프레임의 밝기가 실제로 달라지는지 확인합니다.
+- `--windowed`: 전체 화면 대신 창 모드로 패턴 표시를 확인합니다.
+- `--stretch`: 표시 영역에 맞춰 패턴을 늘립니다. 기본값은 종횡비 유지입니다.
+- `--settle-ms`: 패턴 표시 후 촬영 명령 전 대기 시간입니다.
+- `--exposure-us`, `--iso`, `--focus-diopters`: Android에 전달할 수동 카메라 설정입니다.
+- `--manual-focus-confirmed`, `--phone-mount-id`, `--rig-id`, `--calibration-id`: 촬영 조건 추적용 메타데이터입니다.
+- `--dry-run --no-display`: 실제 Android 없이 저장 포맷과 로그 생성을 검증합니다.
 
-## 3단계: 0도/180도 회전
+## 3단계: HDR 브라켓 촬영
 
-소프트웨어 관점에서 첫 버전은 각도를 서로 다른 촬영 블록으로 취급합니다.
+기본은 단일 노출입니다. HDR이 필요할 때는 패턴마다 여러 노출 브라켓을 촬영하고, PC에서 같은 pattern id의 브라켓 이미지를 하나의 디코더 프레임으로 병합합니다.
+
+HDR 기본 브라켓을 쓰려면 다음 옵션을 사용합니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --enable-hdr
+```
+
+브라켓을 직접 지정할 수도 있습니다.
+
+```powershell
+.\.venv-pc\Scripts\python.exe structured_light_pc_controller.py --hdr-brackets short:3000:100,mid:10000:100,long:30000:100
+```
+
+HDR 결과 구조는 다음과 같습니다.
 
 ```text
-angle_000/
-  exposure_010ms/
-  exposure_030ms/
-  exposure_080ms/
-angle_180/
-  exposure_010ms/
-  exposure_030ms/
-  exposure_080ms/
+captures/<scan_id>/angle_000/
+  exposures/
+    pattern_000/
+      short.png
+      mid.png
+      long.png
+  pattern_000.png
+  hdr_masks/
+  scan_log.json
+  hdr_merge_report.json
+  scan_log.csv
 ```
 
-스크립트는 각도 사이에서 일시 정지하여 회전 디스크를 수동으로 움직일 수 있게 합니다. 이후에는 이 일시 정지를 시리얼 모터 컨트롤러로 대체할 수 있습니다.
+단일 노출일 때도 원본은 `exposures/pattern_XXX/single.png`로 저장되고, 디코더 입력용 최종 이미지는 `pattern_XXX.png`로 저장됩니다.
 
-## 향후: USL / 비동기 촬영
+## 4단계: 0도/180도 촬영
 
-USL은 동기식 파이프라인에서 사용 가능한 Gray/PSP 데이터가 나온 뒤에 추가하는 것이 좋습니다. 향후 비동기 설계에서는 다음 정보를 기록해야 합니다.
+기본 각도 목록은 `0,180`입니다. 각도마다 같은 22프레임 패턴 세트를 촬영합니다.
 
-- 단조 증가 타임스탬프가 포함된 프로젝터 패턴 스케줄
-- 카메라 프레임 타임스탬프
-- 각 프레임의 노출 시간과 게인
-- 이미지 내용 또는 작은 코너 마커로 감지한 패턴 ID
+```text
+captures/<scan_id>/angle_000/
+  pattern_000.png
+  ...
+  pattern_021.png
+captures/<scan_id>/angle_180/
+  pattern_000.png
+  ...
+  pattern_021.png
+```
 
-보정 전략:
+각도 이동은 촬영 프로토콜과 분리되어 있습니다. 현재 가능한 방식은 다음과 같습니다.
 
-1. 각 촬영 프레임이 어떤 투영 패턴에 해당하는지 디코딩하거나 추론합니다.
-2. 타임스탬프 차이로 카메라 지연 시간과 프레임 간격을 추정합니다.
-3. 패턴이 바뀌는 중에 촬영된 전환 프레임을 제외합니다.
-4. 채택된 프레임으로 노출별 깨끗한 14개 패턴 세트를 다시 구성합니다.
+- GUI에서 각도 사이에 멈춘 뒤 `Next Angle`로 진행합니다.
+- `--no-angle-prompt`로 각도 대기 없이 연속 진행합니다.
+- `--angle-advance-file`로 외부 신호 파일을 기다립니다.
+- `--rotation-command "my_rotate_command --angle {angle}"`로 각도별 외부 회전 명령을 실행합니다.
+- `--rotate-first-angle`을 함께 사용하면 첫 각도에서도 회전 명령을 실행합니다.
 
-이렇게 하면 각 카메라 프레임이 이미 동기화되어 있다고 가정하는 대신, 비동기 촬영을 소프트웨어 정렬 문제로 다룰 수 있습니다.
+분석 대상은 촬영 각도와 별도로 지정할 수 있습니다.
+
+- `--analysis-mode bidirectional`: 촬영한 모든 각도를 분석 대상으로 기록합니다.
+- `--analysis-mode single`: 한 각도만 분석 대상으로 기록합니다.
+- `--single-analysis-angle 180`: single 모드에서 특정 각도를 선택합니다.
+
+## 5단계: 로그와 메타데이터
+
+각 스캔은 다음 정보를 남깁니다.
+
+- 패턴 ID, 라벨, 파일명, 표시 시각
+- 캡처 ID, Android 업로드 파일명, 업로드 시각
+- 각도 정보: `angle_deg`, `angle_index`, `angle_count`
+- 노출/ISO/초점/브라켓 정보
+- 스캔 종류: `object` 또는 `reference`
+- 장비/조건 메타데이터: `rig_id`, `phone_mount_id`, `calibration_id`, `projector_tilt_deg`, `projector_brightness`
+- HDR 설정과 병합 결과
+- 분석 대상 각도 목록
+
+현재 산출물은 디코딩 전 입력 데이터 정리까지를 목표로 합니다. Height map, point cloud, Gray/PSP 디코딩 파이프라인은 아직 별도 구현 대상입니다.
+
+## 다음 작업
+
+1. `sequence.json`의 `gray_code_polarity_mask`를 반영하는 Gray/PSP 디코더를 추가합니다.
+2. `analysis_manifest.json`을 입력으로 받아 각도별 디코딩 결과를 같은 스캔 폴더에 저장합니다.
+3. 기준 평면 또는 기준 보드 촬영을 이용해 높이 보정 단계를 정의합니다.
+4. 필요하면 LightCrafter USB 제어 범위를 LED 밝기 제어에서 패턴 모드/트리거 제어까지 확장합니다.
