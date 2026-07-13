@@ -787,7 +787,8 @@ class PatternDisplay:
         canvas[y : y + out_h, x : x + out_w] = resized
         return canvas
 
-    def show(self, image: np.ndarray) -> None:
+    def show(self, pattern: PatternSpec, image: np.ndarray) -> None:
+        del pattern
         cv2.imshow(self.window_name, self.render(image))
         cv2.waitKey(1)
 
@@ -798,6 +799,91 @@ class PatternDisplay:
 
     def close(self) -> None:
         cv2.destroyWindow(self.window_name)
+
+
+class FlashPatternDisplay:
+    def __init__(self, args: argparse.Namespace, required_ids: tuple[int, ...]) -> None:
+        self.tool = args.projector_tool.resolve()
+        self.required_ids = required_ids
+        self.process: subprocess.Popen[str] | None = None
+
+    def open(self) -> None:
+        if not self.tool.is_file():
+            raise RuntimeError(f"Projector helper was not found: {self.tool}")
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self.process = subprocess.Popen(
+            [str(self.tool), "session"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creationflags,
+        )
+        response = self._read_response("READY")
+        try:
+            image_count = int(response.split()[1])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError(f"Invalid projector READY response: {response}") from exc
+        missing = [pattern_id for pattern_id in self.required_ids if pattern_id >= image_count]
+        if missing:
+            raise RuntimeError(
+                f"Projector flash has {image_count} images; required indices are missing: {missing}"
+            )
+        print(
+            f"[display] source=projector-flash images={image_count} "
+            f"tool={self.tool}"
+        )
+
+    def _read_response(self, expected_prefix: str) -> str:
+        if self.process is None or self.process.stdout is None:
+            raise RuntimeError("Projector helper is not running")
+        response = self.process.stdout.readline().strip()
+        if not response:
+            exit_code = self.process.poll()
+            raise RuntimeError(f"Projector helper closed unexpectedly (exit={exit_code})")
+        if not response.startswith(expected_prefix):
+            raise RuntimeError(f"Projector command failed: {response}")
+        return response
+
+    def _command(self, command: str) -> None:
+        if self.process is None or self.process.stdin is None:
+            raise RuntimeError("Projector helper is not running")
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+        self._read_response("OK")
+
+    def show(self, pattern: PatternSpec, image: np.ndarray) -> None:
+        del image
+        self._command(f"show {pattern.pattern_id}")
+
+    def black(self) -> None:
+        self._command("black")
+
+    def close(self) -> None:
+        process = self.process
+        self.process = None
+        if process is None:
+            return
+        try:
+            if process.poll() is None and process.stdin is not None:
+                process.stdin.write("quit\n")
+                process.stdin.flush()
+                process.wait(timeout=3)
+        except (BrokenPipeError, subprocess.TimeoutExpired):
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+            if process.stdout is not None:
+                process.stdout.close()
 
 
 def make_capture_message(
@@ -1301,7 +1387,7 @@ async def run_scan(args: argparse.Namespace) -> int:
     scan_rows: list[dict[str, Any]] = []
     decode_records: dict[str, list[dict[str, Any]]] = {}
     channel_quality_frames: dict[str, dict[int, np.ndarray]] = {}
-    display: PatternDisplay | None = None
+    display: PatternDisplay | FlashPatternDisplay | None = None
     capture_id = 0
     aborted = False
     validation_error = ""
@@ -1313,7 +1399,8 @@ async def run_scan(args: argparse.Namespace) -> int:
         f"[scan] scan_id={scan_id} mode={args.pattern_mode} "
         f"patterns={len(capture_patterns)} raw_captures_per_angle="
         f"{len(capture_patterns) * len(hdr_settings.brackets)} "
-        f"angles={angles} analysis={args.analysis_mode} dry_run={args.dry_run}"
+        f"angles={angles} analysis={args.analysis_mode} "
+        f"projection={args.projection_source} dry_run={args.dry_run}"
     )
     print(
         "[scan] HDR brackets="
@@ -1487,7 +1574,10 @@ async def run_scan(args: argparse.Namespace) -> int:
                     print("[scan] ping/pong check timed out; continuing with capture handshake")
 
             if not args.no_display:
-                display = PatternDisplay(args, first_image)
+                if args.projection_source == "flash":
+                    display = FlashPatternDisplay(args, expected_ids)
+                else:
+                    display = PatternDisplay(args, first_image)
                 display.open()
                 display.black()
                 await asyncio.sleep(args.pre_black_ms / 1000.0)
@@ -1531,7 +1621,7 @@ async def run_scan(args: argparse.Namespace) -> int:
 
                         for attempt in range(1, args.retries + 2):
                             if display is not None:
-                                display.show(image)
+                                display.show(pattern, image)
                             display_ts = now_ms()
                             settle_ms = (
                                 args.settle_ms
@@ -1682,9 +1772,13 @@ async def run_scan(args: argparse.Namespace) -> int:
         print(f"[scan] ERROR: {exc}")
     finally:
         if display is not None:
-            display.black()
-            await asyncio.sleep(args.finish_black_ms / 1000.0)
-            display.close()
+            try:
+                display.black()
+                await asyncio.sleep(args.finish_black_ms / 1000.0)
+            except Exception as exc:
+                print(f"[display] cleanup warning: {exc}")
+            finally:
+                display.close()
 
         if not aborted and not args.server_only:
             try:
@@ -1780,6 +1874,10 @@ async def run_scan(args: argparse.Namespace) -> int:
                 "capture_timeout": args.capture_timeout,
                 "upload_timeout": args.upload_timeout,
                 "retries": args.retries,
+                "projection_source": args.projection_source,
+                "projector_tool": str(args.projector_tool)
+                if args.projection_source == "flash"
+                else "",
             },
             "rows": scan_rows,
         }
@@ -1827,6 +1925,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--public-host", help="LAN IP/hostname sent to Android upload_url.")
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--monitor", default=1, type=int)
+    parser.add_argument(
+        "--projection-source",
+        default="hdmi",
+        choices=("hdmi", "flash"),
+        help="Display patterns through a PC monitor/HDMI or from projector flash.",
+    )
+    parser.add_argument(
+        "--projector-tool",
+        default=Path(__file__).resolve().parent / "dlpc350_projector.exe",
+        type=Path,
+        help="DLPC350 USB helper used by --projection-source flash.",
+    )
     parser.add_argument("--window-name", default="StructuredLight Projection")
     parser.add_argument("--windowed", action="store_true")
     parser.add_argument("--window-x", type=int)

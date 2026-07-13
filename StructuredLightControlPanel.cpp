@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
 
@@ -26,6 +27,7 @@ namespace {
 constexpr wchar_t kAppClass[] = L"StructuredLightControlPanelWindow";
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
+constexpr UINT WM_APP_MAINT_DONE = WM_APP + 3;
 
 enum ControlId {
     IDC_STATUS = 100,
@@ -64,6 +66,11 @@ enum ControlId {
     IDC_LED_VALUE,
     IDC_APPLY_LED,
     IDC_LED_OFF,
+    IDC_PROJECTION_SOURCE,
+    IDC_PREPARE_FLASH,
+    IDC_PROGRAM_FLASH,
+    IDC_AUTO_FLASH,
+    IDC_STOP_FLASH,
 };
 
 struct AppState {
@@ -100,9 +107,15 @@ struct AppState {
     HWND ledValue{};
     HWND applyLed{};
     HWND ledOff{};
+    HWND projectionSource{};
+    HWND prepareFlash{};
+    HWND programFlash{};
+    HWND autoFlash{};
+    HWND stopFlash{};
     PROCESS_INFORMATION scanProcess{};
     HANDLE scanPipeRead = nullptr;
     std::atomic_bool scanRunning{false};
+    std::atomic_bool maintenanceRunning{false};
     std::wstring root;
     std::wstring angleAdvanceFile;
 };
@@ -324,6 +337,14 @@ HWND make_checkbox(HWND parent, int id, const wchar_t* text, int x, int y, int w
     return hwnd;
 }
 
+HWND make_combo(HWND parent, int id, int x, int y, int w, int h) {
+    HWND hwnd = CreateWindowW(
+        WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        x, y, w, h, parent, reinterpret_cast<HMENU>(id), g_app.instance, nullptr);
+    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+    return hwnd;
+}
+
 void set_font_recursive(HWND parent) {
     HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     SendMessageW(parent, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -341,6 +362,19 @@ std::wstring browse_folder(HWND owner, const wchar_t* title, const std::wstring&
     if (SHGetPathFromIDListW(pidl, path)) result = path;
     CoTaskMemFree(pidl);
     return result;
+}
+
+std::wstring browse_file(HWND owner, const wchar_t* title, const wchar_t* filter) {
+    wchar_t path[32768]{};
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = owner;
+    dialog.lpstrTitle = title;
+    dialog.lpstrFilter = filter;
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(path));
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&dialog) ? std::wstring(path) : L"";
 }
 
 bool file_exists(const std::wstring& path) {
@@ -391,6 +425,22 @@ std::wstring checkbox_arg(HWND hwnd) {
     return SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"true" : L"false";
 }
 
+bool projector_flash_selected() {
+    return SendMessageW(g_app.projectionSource, CB_GETCURSEL, 0, 0) == 1;
+}
+
+void update_projection_controls() {
+    const bool flash = projector_flash_selected();
+    EnableWindow(g_app.monitor, !flash);
+    EnableWindow(g_app.windowed, !flash);
+    EnableWindow(g_app.stretch, !flash);
+    if (flash) {
+        set_text(g_app.patterns, path_join(g_app.root, L"generated_patterns_flash"));
+    } else {
+        set_text(g_app.patterns, path_join(g_app.root, L"generated_patterns"));
+    }
+}
+
 std::wstring build_scan_command() {
     std::wstring python = path_join(g_app.root, L".venv-pc\\Scripts\\python.exe");
     std::wstring controller = path_join(g_app.root, L"structured_light_pc_controller.py");
@@ -414,6 +464,13 @@ std::wstring build_scan_command() {
         << L" --angle-advance-file " << quote(g_app.angleAdvanceFile)
         << L" --manual " << checkbox_arg(g_app.manual);
 
+    if (projector_flash_selected()) {
+        cmd << L" --projection-source flash --projector-tool "
+            << quote(path_join(g_app.root, L"dlpc350_projector.exe"));
+    } else {
+        cmd << L" --projection-source hdmi";
+    }
+
     if (SendMessageW(g_app.windowed, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --windowed";
     if (SendMessageW(g_app.stretch, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --stretch";
     if (SendMessageW(g_app.pauseFirst, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --pause-before-first-angle";
@@ -425,6 +482,111 @@ std::wstring build_scan_command() {
     if (SendMessageW(g_app.retainRawExposures, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --retain-raw-exposures";
     if (SendMessageW(g_app.retainHdrMasks, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --retain-hdr-masks";
     return cmd.str();
+}
+
+void maintenance_worker(std::wstring command, std::wstring label) {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE readPipe = nullptr;
+    HANDLE writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) {
+        post_log(L"\r\n[projector] Failed to create process pipe.\r\n");
+        PostMessageW(g_app.window, WM_APP_MAINT_DONE, 1, 0);
+        return;
+    }
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = writePipe;
+    startup.hStdError = writePipe;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    const BOOL started = CreateProcessW(
+        nullptr, mutableCommand.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+        nullptr, g_app.root.c_str(), &startup, &process);
+    CloseHandle(writePipe);
+    if (!started) {
+        CloseHandle(readPipe);
+        post_log(L"\r\n[projector] Could not start " + label + L".\r\n");
+        PostMessageW(g_app.window, WM_APP_MAINT_DONE, 1, 0);
+        return;
+    }
+
+    char buffer[4096];
+    DWORD read = 0;
+    while (ReadFile(readPipe, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+        post_log(utf8_to_wide(buffer, static_cast<int>(read)));
+    }
+    CloseHandle(readPipe);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    PostMessageW(g_app.window, WM_APP_MAINT_DONE, exitCode, 0);
+}
+
+void run_maintenance(const std::wstring& command, const std::wstring& label) {
+    if (g_app.scanRunning.load() || g_app.maintenanceRunning.exchange(true)) return;
+    EnableWindow(g_app.start, FALSE);
+    EnableWindow(g_app.prepareFlash, FALSE);
+    EnableWindow(g_app.programFlash, FALSE);
+    EnableWindow(g_app.autoFlash, FALSE);
+    EnableWindow(g_app.stopFlash, FALSE);
+    set_status(label);
+    append_log(g_app.log, L"\r\n=== " + label + L" ===\r\n");
+    std::thread(maintenance_worker, command, label).detach();
+}
+
+void prepare_flash_package() {
+    const std::wstring base = browse_file(
+        g_app.window, L"Select the TI base firmware (.bin)",
+        L"Firmware (*.bin)\0*.bin\0All files\0*.*\0\0");
+    if (base.empty()) return;
+    const std::wstring script = path_join(g_app.root, L"build_projector_flash_package.ps1");
+    if (!file_exists(script)) {
+        MessageBoxW(g_app.window, L"build_projector_flash_package.ps1 was not found.", L"Missing Tool", MB_ICONERROR);
+        return;
+    }
+    const std::wstring command = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File " +
+                                 quote(script) + L" -BaseFirmware " + quote(base);
+    run_maintenance(command, L"Building Flash Package");
+}
+
+void program_projector_flash() {
+    const std::wstring package = path_join(g_app.root, L"dist\\PRO4500_patterns_firmware.bin");
+    const std::wstring tool = path_join(g_app.root, L"dlpc350_projector.exe");
+    if (!file_exists(package) || !file_exists(tool)) {
+        MessageBoxW(g_app.window, L"Build the flash package and native tools first.", L"Missing Package", MB_ICONERROR);
+        return;
+    }
+    const wchar_t* warning =
+        L"This will erase and rewrite the projector application firmware and stored images.\n"
+        L"The 128 KB bootloader area will be preserved. Keep projector power and USB connected.\n\n"
+        L"Continue?";
+    if (MessageBoxW(g_app.window, warning, L"Program Projector Flash", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    const std::wstring command = quote(tool) + L" flash --firmware " + quote(package) +
+                                 L" --confirm ERASE_APP_FLASH";
+    run_maintenance(command, L"Programming Projector Flash");
+}
+
+void auto_play_flash() {
+    const std::wstring tool = path_join(g_app.root, L"dlpc350_projector.exe");
+    if (!file_exists(tool)) return;
+    run_maintenance(
+        quote(tool) + L" auto --count 22 --exposure-us 500000 --period-us 500000",
+        L"Starting Flash Auto Play");
+}
+
+void stop_projector_sequence() {
+    const std::wstring tool = path_join(g_app.root, L"dlpc350_projector.exe");
+    if (!file_exists(tool)) return;
+    run_maintenance(quote(tool) + L" stop", L"Stopping Projector Sequence");
 }
 
 void read_pipe_thread(HANDLE pipe) {
@@ -458,6 +620,11 @@ void start_scan() {
     }
     if (!dir_exists(get_text(g_app.patterns))) {
         MessageBoxW(g_app.window, L"Pattern folder does not exist.", L"Missing Patterns", MB_ICONERROR);
+        return;
+    }
+    if (projector_flash_selected() &&
+        !file_exists(path_join(g_app.root, L"dlpc350_projector.exe"))) {
+        MessageBoxW(g_app.window, L"dlpc350_projector.exe was not found. Run build_native_control_panel.bat first.", L"Missing Projector Tool", MB_ICONERROR);
         return;
     }
 
@@ -582,6 +749,17 @@ void build_ui(HWND hwnd) {
     make_button(hwnd, IDC_BROWSE_PATTERNS, L"Browse", 830, y, 110, 24);
 
     y += 32;
+    make_label(hwnd, L"Projection", margin, y + 4, 75, 22);
+    g_app.projectionSource = make_combo(hwnd, IDC_PROJECTION_SOURCE, 90, y, 175, 300);
+    SendMessageW(g_app.projectionSource, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"PC / HDMI"));
+    SendMessageW(g_app.projectionSource, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Projector Flash"));
+    SendMessageW(g_app.projectionSource, CB_SETCURSEL, 0, 0);
+    g_app.prepareFlash = make_button(hwnd, IDC_PREPARE_FLASH, L"Build Flash Package", 280, y, 155, 25);
+    g_app.programFlash = make_button(hwnd, IDC_PROGRAM_FLASH, L"Program Projector", 445, y, 145, 25);
+    g_app.autoFlash = make_button(hwnd, IDC_AUTO_FLASH, L"Auto Play", 600, y, 100, 25);
+    g_app.stopFlash = make_button(hwnd, IDC_STOP_FLASH, L"Stop Sequence", 710, y, 110, 25);
+
+    y += 32;
     make_label(hwnd, L"Output", margin, y + 4, 80, 22);
     g_app.output = make_edit(hwnd, IDC_OUTPUT, path_join(g_app.root, L"captures"), 110, y, 710, 24);
     make_button(hwnd, IDC_BROWSE_OUTPUT, L"Browse", 830, y, 110, 24);
@@ -663,6 +841,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case IDC_BROWSE_OUTPUT:
             set_text(g_app.output, browse_folder(hwnd, L"Select output folder", get_text(g_app.output)));
             return 0;
+        case IDC_PROJECTION_SOURCE:
+            if (HIWORD(wparam) == CBN_SELCHANGE) update_projection_controls();
+            return 0;
+        case IDC_PREPARE_FLASH:
+            prepare_flash_package();
+            return 0;
+        case IDC_PROGRAM_FLASH:
+            program_projector_flash();
+            return 0;
+        case IDC_AUTO_FLASH:
+            auto_play_flash();
+            return 0;
+        case IDC_STOP_FLASH:
+            stop_projector_sequence();
+            return 0;
         case IDC_START:
             start_scan();
             return 0;
@@ -722,7 +915,27 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         set_status(exitCode == 0 ? L"Finished" : L"Failed");
         return 0;
     }
+    case WM_APP_MAINT_DONE: {
+        const DWORD exitCode = static_cast<DWORD>(wparam);
+        g_app.maintenanceRunning.store(false);
+        EnableWindow(g_app.start, TRUE);
+        EnableWindow(g_app.prepareFlash, TRUE);
+        EnableWindow(g_app.programFlash, TRUE);
+        EnableWindow(g_app.autoFlash, TRUE);
+        EnableWindow(g_app.stopFlash, TRUE);
+        std::wstringstream stream;
+        stream << L"\r\n=== Projector operation finished with exit code " << exitCode << L" ===\r\n";
+        append_log(g_app.log, stream.str());
+        set_status(exitCode == 0 ? L"Ready" : L"Projector Error");
+        return 0;
+    }
     case WM_CLOSE:
+        if (g_app.maintenanceRunning.load()) {
+            MessageBoxW(hwnd,
+                        L"A projector operation is still running. Wait for it to finish before exiting.",
+                        L"Projector Busy", MB_OK | MB_ICONWARNING);
+            return 0;
+        }
         if (g_app.scanRunning.load()) {
             if (MessageBoxW(hwnd, L"A scan is running. Stop it and exit?", L"Exit", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
             TerminateProcess(g_app.scanProcess.hProcess, 130);
@@ -762,7 +975,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     HWND hwnd = CreateWindowExW(
         0, kAppClass, L"Structured Light Scan Controller",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 980, 790,
+        CW_USEDEFAULT, CW_USEDEFAULT, 980, 850,
         nullptr, nullptr, instance, nullptr);
 
     if (!hwnd) return 1;

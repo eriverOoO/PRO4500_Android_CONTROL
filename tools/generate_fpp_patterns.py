@@ -39,6 +39,10 @@ AVOID_SPLIT_EDGE_BLACK = True
 # needed later.
 IMAGE_FORMAT = "bmp"
 
+# The flash firmware builder accepts 24-bit BMP splash images. HDMI patterns
+# stay single-channel by default because OpenCV expands them for display.
+RGB24_OUTPUT = False
+
 # Patterns are written to the project root, not inside tools/.
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "generated_patterns"
 
@@ -55,7 +59,7 @@ def gray_encode(values: np.ndarray) -> np.ndarray:
     return values ^ (values >> 1)
 
 
-def validate_config() -> int:
+def validate_config() -> float:
     if PROJECTOR_WIDTH <= 0 or PROJECTOR_HEIGHT <= 0:
         raise ValueError("PROJECTOR_WIDTH and PROJECTOR_HEIGHT must be positive.")
 
@@ -66,15 +70,11 @@ def validate_config() -> int:
         raise ValueError('IMAGE_FORMAT must be either "bmp" or "png".')
 
     gray_code_count = 1 << GRAY_CODE_BITS
-    if PROJECTOR_WIDTH % gray_code_count != 0:
+    if PROJECTOR_WIDTH < gray_code_count:
         raise ValueError(
-            "PROJECTOR_WIDTH must be divisible by 2**GRAY_CODE_BITS so the finest "
-            "Gray-code stripe width is an exact integer number of projector pixels."
+            "PROJECTOR_WIDTH must provide at least one pixel for every Gray-code cell."
         )
-
-    stripe_width_px = PROJECTOR_WIDTH // gray_code_count
-    if stripe_width_px <= 0:
-        raise ValueError("The computed Gray-code stripe width must be at least 1 px.")
+    stripe_width_px = PROJECTOR_WIDTH / gray_code_count
 
     return stripe_width_px
 
@@ -90,7 +90,7 @@ def gray_bit_polarity_mask() -> int:
 
 def vertical_gray_pattern(
     bit_index_from_msb: int,
-    stripe_width_px: int,
+    stripe_width_px: float,
     polarity_mask: int,
 ) -> np.ndarray:
     """Create one vertical-stripe Gray-code bit plane.
@@ -109,15 +109,15 @@ def vertical_gray_pattern(
     """
     bit = GRAY_CODE_BITS - 1 - bit_index_from_msb
 
-    x = np.arange(PROJECTOR_WIDTH, dtype=np.uint16)
-    code_cell = x // stripe_width_px
+    x = np.arange(PROJECTOR_WIDTH, dtype=np.uint32)
+    code_cell = (x * (1 << GRAY_CODE_BITS)) // PROJECTOR_WIDTH
     gray = gray_encode(code_cell) ^ polarity_mask
 
     row = (((gray >> bit) & 1) * 255).astype(np.uint8)
     return np.repeat(row[np.newaxis, :], PROJECTOR_HEIGHT, axis=0)
 
 
-def vertical_sine_pattern(phase_shift_rad: float, wavelength_px: int) -> np.ndarray:
+def vertical_sine_pattern(phase_shift_rad: float, wavelength_px: float) -> np.ndarray:
     """Create one vertical sinusoidal PSP pattern.
 
     Intensity model:
@@ -138,7 +138,8 @@ def write_image(path: Path, image: np.ndarray) -> None:
     if image.dtype != np.uint8 or image.ndim != 2:
         raise ValueError(f"{path.name} must be a single-channel uint8 image.")
 
-    ok = cv2.imwrite(str(path), image)
+    output_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if RGB24_OUTPUT else image
+    ok = cv2.imwrite(str(path), output_image)
     if ok:
         return
 
@@ -149,7 +150,7 @@ def write_image(path: Path, image: np.ndarray) -> None:
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / f"{path.stem}_{uuid.uuid4().hex}{path.suffix}"
 
-    ok = cv2.imwrite(str(temp_path), image)
+    ok = cv2.imwrite(str(temp_path), output_image)
     if not ok:
         raise OSError(f"cv2.imwrite failed for both {path} and {temp_path}")
 
@@ -247,6 +248,7 @@ def generate_patterns() -> list[Path]:
                 "projector_height": PROJECTOR_HEIGHT,
                 "finest_gray_stripe_width_px": stripe_width_px,
                 "sinusoidal_wavelength_px": stripe_width_px,
+                "rgb24_output": RGB24_OUTPUT,
                 "includes_inverted_gray": INCLUDE_INVERTED_GRAY,
                 "avoid_split_edge_black": AVOID_SPLIT_EDGE_BLACK,
                 "gray_code_polarity_mask": polarity_mask,
@@ -260,8 +262,9 @@ def generate_patterns() -> list[Path]:
     print(f"Generated {len(written)} {IMAGE_FORMAT.upper()} patterns in: {OUTPUT_DIR}")
     print(f"Resolution: {PROJECTOR_WIDTH} x {PROJECTOR_HEIGHT}")
     print(f"Gray-code bits: {GRAY_CODE_BITS}")
-    print(f"Finest Gray stripe width: {stripe_width_px} px")
-    print(f"Sinusoidal wavelength: {stripe_width_px} px")
+    print(f"Finest Gray stripe width: {stripe_width_px:g} px")
+    print(f"Sinusoidal wavelength: {stripe_width_px:g} px")
+    print(f"Pixel format: {'24-bit RGB' if RGB24_OUTPUT else '8-bit grayscale'}")
     print(f"Inverted Gray frames: {'yes' if INCLUDE_INVERTED_GRAY else 'no'}")
     print(f"Gray-code polarity mask: 0x{polarity_mask:0{max(1, (GRAY_CODE_BITS + 3) // 4)}X}")
 
@@ -277,6 +280,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", default=PROJECTOR_HEIGHT, type=int)
     parser.add_argument("--gray-code-bits", default=GRAY_CODE_BITS, type=int)
     parser.add_argument("--format", default=IMAGE_FORMAT, choices=("bmp", "png"))
+    parser.add_argument(
+        "--rgb24",
+        action="store_true",
+        help="Write 24-bit RGB images required by the DLPC350 firmware builder.",
+    )
     parser.add_argument(
         "--legacy-14",
         action="store_true",
@@ -295,6 +303,7 @@ def main() -> int:
     global OUTPUT_DIR
     global CLEAN_EXISTING_IMAGES
     global INCLUDE_INVERTED_GRAY
+    global RGB24_OUTPUT
 
     PROJECTOR_WIDTH = args.width
     PROJECTOR_HEIGHT = args.height
@@ -303,6 +312,10 @@ def main() -> int:
     OUTPUT_DIR = args.output
     CLEAN_EXISTING_IMAGES = not args.no_clean
     INCLUDE_INVERTED_GRAY = not args.legacy_14
+    RGB24_OUTPUT = args.rgb24
+
+    if RGB24_OUTPUT and IMAGE_FORMAT != "bmp":
+        raise SystemExit("--rgb24 requires --format bmp")
 
     generate_patterns()
     return 0

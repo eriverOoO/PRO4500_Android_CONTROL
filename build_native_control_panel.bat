@@ -38,7 +38,7 @@ if not defined GUI_DIR (
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
-echo [1/2] Compiling HIDAPI...
+echo [1/4] Compiling HIDAPI...
 "%MINGW%\gcc.exe" -std=gnu11 -O2 -Wall -Wno-stringop-truncation ^
   -I"%GUI_DIR%\hidapi-master\hidapi" ^
   -c "%GUI_DIR%\hidapi-master\windows\hid.c" ^
@@ -49,7 +49,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/2] Building StructuredLightControlPanel.exe...
+echo [2/4] Building StructuredLightControlPanel.exe...
 "%MINGW%\g++.exe" -std=c++17 -O2 -Wall -Wextra -municode -mwindows ^
   -I"%GUI_PARENT%" -I"%GUI_DIR%" -I"%GUI_DIR%\hidapi-master\hidapi" ^
   StructuredLightControlPanel.cpp ^
@@ -58,12 +58,45 @@ echo [2/2] Building StructuredLightControlPanel.exe...
   "%GUI_DIR%\dlpc350_common.cpp" ^
   "%HIDAPI_OBJ%" ^
   -o StructuredLightControlPanel.exe ^
-  -lsetupapi -lhid -lcomctl32 -lshell32 -lole32 -lws2_32 -luuid
+  -lsetupapi -lhid -lcomctl32 -lcomdlg32 -lshell32 -lole32 -lws2_32 -luuid
 
 if errorlevel 1 (
   echo [ERROR] Build failed.
   exit /b 1
 )
 
-echo Build complete: %CD%\StructuredLightControlPanel.exe
+echo [3/4] Building dlpc350_projector.exe...
+"%MINGW%\g++.exe" -std=c++17 -O2 -Wall -Wextra -municode ^
+  -I"%GUI_PARENT%" -I"%GUI_DIR%" -I"%GUI_DIR%\hidapi-master\hidapi" ^
+  dlpc350_projector.cpp ^
+  dlpc350_usb_standalone.cpp ^
+  "%GUI_DIR%\dlpc350_api.cpp" ^
+  "%GUI_DIR%\dlpc350_firmware.cpp" ^
+  "%GUI_DIR%\dlpc350_common.cpp" ^
+  "%HIDAPI_OBJ%" ^
+  -o dlpc350_projector.exe ^
+  -lsetupapi -lhid
+
+if errorlevel 1 (
+  echo [ERROR] Projector helper build failed.
+  exit /b 1
+)
+
+echo [4/4] Building dlpc350_firmware_pack.exe...
+"%MINGW%\g++.exe" -std=c++17 -O2 -Wall -Wextra -municode ^
+  -I"%GUI_PARENT%" -I"%GUI_DIR%" ^
+  dlpc350_firmware_pack.cpp ^
+  "%GUI_DIR%\dlpc350_firmware.cpp" ^
+  "%GUI_DIR%\dlpc350_common.cpp" ^
+  -o dlpc350_firmware_pack.exe
+
+if errorlevel 1 (
+  echo [ERROR] Firmware packer build failed.
+  exit /b 1
+)
+
+echo Build complete:
+echo   %CD%\StructuredLightControlPanel.exe
+echo   %CD%\dlpc350_projector.exe
+echo   %CD%\dlpc350_firmware_pack.exe
 exit /b 0
