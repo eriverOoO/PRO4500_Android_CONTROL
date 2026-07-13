@@ -899,7 +899,6 @@ def make_capture_message(
     pattern_count: int,
     bracket: ExposureBracket,
     bracket_index: int,
-    bracket_count: int,
     capture_id: int,
     angle_deg: int,
     angle_index: int,
@@ -923,7 +922,6 @@ def make_capture_message(
         "bracket_label": bracket.label,
         "bracket": {
             "index": bracket_index,
-            "count": bracket_count,
             "label": bracket.label,
             "exposure_us": bracket.exposure_us,
             "iso": bracket.iso,
@@ -1664,7 +1662,6 @@ async def run_scan(args: argparse.Namespace) -> int:
                                 pattern_count=len(capture_patterns),
                                 bracket=bracket,
                                 bracket_index=bracket_index,
-                                bracket_count=len(hdr_settings.brackets),
                                 capture_id=capture_id,
                                 angle_deg=angle,
                                 angle_index=angle_index,
@@ -1968,8 +1965,8 @@ def parse_args() -> argparse.Namespace:
         default=False,
         type=parse_bool,
         help=(
-            "Request a fixed Camera2 focus distance on Android. The default is false: "
-            "the phone autofocuses before the scan and locks that result during capture."
+            "Request a fixed Camera2 focus distance on Android. The default is false; "
+            "use the phone's Auto focus ON/OFF control to adjust and lock focus."
         ),
     )
     parser.add_argument(

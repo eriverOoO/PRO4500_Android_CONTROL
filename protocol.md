@@ -77,7 +77,6 @@ Android replies with `pong`.
   "bracket_label": "single",
   "bracket": {
     "index": 0,
-    "count": 1,
     "label": "single",
     "exposure_us": 10000,
     "iso": 100
