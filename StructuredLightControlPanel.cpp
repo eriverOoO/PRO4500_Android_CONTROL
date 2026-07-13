@@ -616,7 +616,7 @@ void build_ui(HWND hwnd) {
     g_app.measurementChannel = make_edit(hwnd, IDC_MEASUREMENT_CHANNEL, L"blue", 805, y, 90, 24);
 
     y += 34;
-    g_app.retainRawExposures = make_checkbox(hwnd, IDC_RETAIN_RAW_EXPOSURES, L"Keep exposure originals", margin, y, 180, 24, true);
+    g_app.retainRawExposures = make_checkbox(hwnd, IDC_RETAIN_RAW_EXPOSURES, L"Keep exposure originals", margin, y, 180, 24, false);
     g_app.retainHdrMasks = make_checkbox(hwnd, IDC_RETAIN_HDR_MASKS, L"Keep HDR masks", 210, y, 140, 24, false);
 
     y += 34;

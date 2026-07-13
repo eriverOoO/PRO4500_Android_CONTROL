@@ -1097,7 +1097,7 @@ def merge_hdr_pattern(
         "pattern_id": pattern.pattern_id,
         "label": pattern.label,
         "filename": final_path.name,
-        "bracket_filenames": [rel_posix(Path(record["path"]), decode_dir) for record in records],
+        "bracket_filenames": [rel_posix(Path(record["path"]), scan_dir) for record in records],
         "exposure_us": [int(record["exposure_us"]) for record in records],
         "iso": [int(record["iso"]) for record in records],
         "focus_diopters": records[0].get("focus_diopters"),
@@ -1118,7 +1118,7 @@ def merge_hdr_pattern(
             {
                 "bracket_label": record.get("bracket_label"),
                 "bracket_index": record.get("bracket_index"),
-                "filename": rel_posix(Path(record["path"]), decode_dir),
+                "filename": rel_posix(Path(record["path"]), scan_dir),
                 "exposure_us": record.get("exposure_us"),
                 "iso": record.get("iso"),
                 "focus_diopters": record.get("focus_diopters"),
