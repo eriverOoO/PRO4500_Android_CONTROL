@@ -380,33 +380,30 @@ captures/
     pattern_001.png
     ...
     pattern_021.png
-    hdr_masks/                  # optional: Keep HDR masks
+    hdr_masks/                  # 선택 사항: HDR 마스크 유지
       pattern_000_saturated.png
       pattern_000_dark.png
     channel_quality_report.json
     scan_log.json
     hdr_merge_report.json
     scan_log.csv
-  raw/                          # optional: Keep exposure originals
+  raw/                          # 선택 사항: 원본 노출 이미지 유지
     angle_000/
       short/
-        pattern_000.png         # lossless RGB converted from YUV_420_888
+        pattern_000.png         # YUV_420_888에서 변환한 무손실 RGB
       mid/
       long/
 ```
 
-The Android camera uploads lossless RGB PNG frames converted from CameraX
-`YUV_420_888`. The PC uses one fixed measurement channel (`blue` by default)
-for every Gray-code and phase frame and writes decoder-ready `pattern_###.png`
-files as mono16. The source is currently 8-bit YUV, so mono16 is a linear
-processing container and does not create additional sensor precision.
-`channel_quality_report.json` compares R/G/B 4-step modulation, saturation,
-and dark ratios for selecting the channel on later scans.
+Android 카메라는 CameraX `YUV_420_888`에서 변환한 무손실 RGB PNG 프레임을 업로드합니다.
+PC는 모든 Gray-code 및 phase 프레임에 하나의 고정 측정 채널을 사용합니다. 기본 채널은 `blue`입니다.
+디코더가 바로 읽을 수 있는 `pattern_###.png` 파일은 mono16 형식으로 저장합니다.
+현재 원본은 8-bit YUV이므로 mono16은 선형 처리용 컨테이너이며 센서 정밀도를 추가로 늘리지는 않습니다.
+`channel_quality_report.json`은 이후 스캔에서 채널을 선택할 수 있도록 R/G/B 4-step 변조, 포화 비율, 암부 비율을 비교합니다.
 
-RGB source and mono16 decoder images use lossless PNG DEFLATE level 3. This
-changes only storage size and transfer time: pixel values are not quantized,
-resampled, or converted to JPEG. Android uploads from the file as a stream and
-the PC writes the multipart payload in 1 MiB chunks.
+RGB 원본과 mono16 디코더 이미지는 무손실 PNG DEFLATE level 3으로 저장합니다.
+이 설정은 저장 용량과 전송 시간만 바꾸며, 픽셀값을 양자화하거나 리샘플링하거나 JPEG로 변환하지 않습니다.
+Android는 파일을 스트림으로 업로드하고, PC는 multipart payload를 1 MiB 단위로 기록합니다.
 
 `scan_log.json`에는 pattern id, label, 최종 파일명, 브라켓 파일명, exposure_us, ISO, focus, scan_type, projector_tilt_deg, keystone_predistortion 정보가 기록됩니다. 실제 휴대폰 없이 저장 포맷을 검증하려면:
 
