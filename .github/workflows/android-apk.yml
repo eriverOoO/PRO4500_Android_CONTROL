@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Release Artifacts
 
 on:
   push:
@@ -47,4 +47,37 @@ jobs:
         with:
           name: StructuredLightPhoneCamera-debug-apk
           path: dist/StructuredLightPhoneCamera-debug.apk
+          if-no-files-found: error
+
+  build-control-panel:
+    name: Build Windows control panel
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build StructuredLightControlPanel.exe
+        shell: cmd
+        run: build_native_control_panel.bat
+
+      - name: Stage control panel artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\StructuredLightControlPanel | Out-Null
+          Copy-Item -Force StructuredLightControlPanel.exe dist\StructuredLightControlPanel\StructuredLightControlPanel.exe
+
+      - name: Upload control panel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StructuredLightControlPanel-windows-exe
+          path: dist/StructuredLightControlPanel/StructuredLightControlPanel.exe
           if-no-files-found: error
