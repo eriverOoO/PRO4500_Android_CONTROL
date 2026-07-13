@@ -44,6 +44,7 @@ enum ControlId {
     IDC_FOCUS,
     IDC_ANGLES,
     IDC_MANUAL,
+    IDC_MANUAL_FOCUS,
     IDC_WINDOWED,
     IDC_STRETCH,
     IDC_PAUSE_FIRST,
@@ -90,6 +91,7 @@ struct AppState {
     HWND focus{};
     HWND angles{};
     HWND manual{};
+    HWND manualFocus{};
     HWND windowed{};
     HWND stretch{};
     HWND pauseFirst{};
@@ -462,7 +464,8 @@ std::wstring build_scan_command() {
         << L" --analysis-mode "
         << quote(SendMessageW(g_app.bidirectionalAnalysis, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"bidirectional" : L"single")
         << L" --angle-advance-file " << quote(g_app.angleAdvanceFile)
-        << L" --manual " << checkbox_arg(g_app.manual);
+        << L" --manual " << checkbox_arg(g_app.manual)
+        << L" --manual-focus " << checkbox_arg(g_app.manualFocus);
 
     if (projector_flash_selected()) {
         cmd << L" --projection-source flash --projector-tool "
@@ -783,8 +786,9 @@ void build_ui(HWND hwnd) {
     g_app.exposure = make_edit(hwnd, IDC_EXPOSURE, L"10000", 292, y, 100, 24);
     make_label(hwnd, L"ISO", 425, y + 4, 40, 22);
     g_app.iso = make_edit(hwnd, IDC_ISO, L"100", 465, y, 80, 24);
-    make_label(hwnd, L"Focus", 575, y + 4, 50, 22);
+    make_label(hwnd, L"Focus (D)", 575, y + 4, 65, 22);
     g_app.focus = make_edit(hwnd, IDC_FOCUS, L"0.0", 625, y, 90, 24);
+    g_app.manualFocus = make_checkbox(hwnd, IDC_MANUAL_FOCUS, L"Manual focus", 730, y, 130, 24, false);
 
     y += 34;
     g_app.hdrEnable = make_checkbox(hwnd, IDC_HDR_ENABLE, L"Enable HDR", margin, y, 110, 24, false);

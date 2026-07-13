@@ -77,13 +77,14 @@ Android replies with `pong`.
   "bracket_label": "single",
   "bracket": {
     "index": 0,
+    "count": 1,
     "label": "single",
     "exposure_us": 10000,
     "iso": 100
   },
   "settings": {
     "manual": true,
-    "manual_focus": true,
+    "manual_focus": false,
     "awb_locked": true,
     "exposure_us": 10000,
     "iso": 100,

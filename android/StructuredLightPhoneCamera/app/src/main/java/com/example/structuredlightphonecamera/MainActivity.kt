@@ -7,8 +7,11 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.os.Bundle
 import android.text.InputType
 import android.util.Log
@@ -138,7 +141,7 @@ data class CameraSettings(
     val manualExposure: Boolean = true,
     val exposureUs: Long = FIXED_EXPOSURE_US,
     val iso: Int = FIXED_ISO,
-    val manualFocus: Boolean = true,
+    val manualFocus: Boolean = false,
     val focusDiopters: Float = FIXED_FOCUS_DIOPTERS,
     val awbLocked: Boolean = true,
     val usePcSettings: Boolean = true,
@@ -152,6 +155,7 @@ data class ManualSupport(
     val afAuto: Boolean = false,
     val afContinuous: Boolean = false,
     val focusDistance: Boolean = false,
+    val minimumFocusDistance: Float = 0.0f,
     val awbOff: Boolean = false,
     val awbLock: Boolean = false,
     val edgeOff: Boolean = false,
@@ -184,10 +188,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var focusEdit: EditText
     private lateinit var manualSwitch: Switch
     private lateinit var manualFocusSwitch: Switch
+    private lateinit var autoFocusSwitch: Switch
     private lateinit var awbLockSwitch: Switch
     private lateinit var pcSettingsSwitch: Switch
     private lateinit var statusText: TextView
     private lateinit var recentText: TextView
+    private lateinit var focusStatusText: TextView
     private lateinit var logText: TextView
 
     private var webSocket: WebSocket? = null
@@ -196,6 +202,25 @@ class MainActivity : ComponentActivity() {
     private var settings = CameraSettings()
     private var boundSettings: CameraSettings? = null
     private var manualSupport = ManualSupport()
+    private var autoFocusEnabled = true
+    private var activeScanId: String? = null
+    private var scanLockedFocusDiopters: Float? = null
+    private var operatorLockedFocusDiopters: Float? = null
+    private var scanFocusPrepared = false
+    @Volatile private var lastLensFocusDiopters: Float? = null
+    @Volatile private var lastAfState: Int? = null
+    private var suppressFocusSwitchCallbacks = false
+
+    private val captureResultCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastLensFocusDiopters = it }
+            result.get(CaptureResult.CONTROL_AF_STATE)?.let { lastAfState = it }
+        }
+    }
 
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -298,7 +323,9 @@ class MainActivity : ComponentActivity() {
             scaleType = PreviewView.ScaleType.FIT_CENTER
             setOnTouchListener { _, event ->
                 if (event.action == MotionEvent.ACTION_UP) {
-                    focusAt(event.x, event.y, lock = true, label = "Tap focus lock")
+                    autoFocusEnabled = false
+                    setAutoFocusSwitchChecked(false)
+                    lockFocusForOperator(event.x, event.y, "Tap focus lock")
                     true
                 } else {
                     true
@@ -344,13 +371,38 @@ class MainActivity : ComponentActivity() {
         root.addView(cameraRow)
 
         manualFocusSwitch = Switch(this).apply {
-            text = "Manual focus distance"
+            text = "Manual focus distance (overrides AF)"
             isChecked = settings.manualFocus
             setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
                 settings = settings.copy(manualFocus = checked)
+                if (checked) {
+                    autoFocusEnabled = false
+                    operatorLockedFocusDiopters = null
+                    setAutoFocusSwitchChecked(false)
+                    updateFocusStatus("MANUAL requested: ${settings.focusDiopters} D (press Apply)")
+                }
             }
         }
         root.addView(manualFocusSwitch)
+
+        autoFocusSwitch = Switch(this).apply {
+            text = "Auto focus (OFF = focus once and lock)"
+            isChecked = autoFocusEnabled
+            setOnCheckedChangeListener { _: CompoundButton, checked: Boolean ->
+                if (!suppressFocusSwitchCallbacks) {
+                    setAutoFocusEnabled(checked)
+                }
+            }
+        }
+        root.addView(autoFocusSwitch)
+
+        focusStatusText = TextView(this).apply {
+            text = "focus: AUTO (continuous preview; locks during scan)"
+            textSize = 13f
+            setTextColor(Color.rgb(30, 70, 120))
+            setPadding(0, 2, 0, 6)
+        }
+        root.addView(focusStatusText)
 
         awbLockSwitch = Switch(this).apply {
             text = "Lock white balance if supported"
@@ -373,15 +425,26 @@ class MainActivity : ComponentActivity() {
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         applyRow.addView(Button(this).apply {
             text = "AF Once"
-            setOnClickListener { autofocusCenter() }
+            setOnClickListener {
+                setAutoFocusSwitchChecked(false)
+                autoFocusEnabled = false
+                lockFocusAtCenter()
+            }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         applyRow.addView(Button(this).apply {
             text = "Lock AF"
-            setOnClickListener { lockFocusAtCenter() }
+            setOnClickListener {
+                setAutoFocusSwitchChecked(false)
+                autoFocusEnabled = false
+                lockFocusAtCenter()
+            }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         applyRow.addView(Button(this).apply {
-            text = "Unlock AF"
-            setOnClickListener { unlockAutofocus() }
+            text = "Resume AF"
+            setOnClickListener {
+                setAutoFocusSwitchChecked(true)
+                setAutoFocusEnabled(true)
+            }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(applyRow)
 
@@ -457,6 +520,22 @@ class MainActivity : ComponentActivity() {
             exposureEdit.setText(settings.exposureUs.toString())
             isoEdit.setText(settings.iso.toString())
             focusEdit.setText(settings.focusDiopters.toString())
+        }
+    }
+
+    private fun setAutoFocusSwitchChecked(checked: Boolean) {
+        if (!::autoFocusSwitch.isInitialized) return
+        runOnUiThread {
+            suppressFocusSwitchCallbacks = true
+            autoFocusSwitch.isChecked = checked
+            suppressFocusSwitchCallbacks = false
+        }
+    }
+
+    private fun updateFocusStatus(status: String) {
+        if (!::focusStatusText.isInitialized) return
+        runOnUiThread {
+            focusStatusText.text = "focus: $status"
         }
     }
 
@@ -558,6 +637,7 @@ class MainActivity : ComponentActivity() {
             afAuto = afModes.contains(CaptureRequest.CONTROL_AF_MODE_AUTO),
             afContinuous = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE),
             focusDistance = minFocus > 0.0f,
+            minimumFocusDistance = minFocus,
             awbOff = awbModes.contains(CaptureRequest.CONTROL_AWB_MODE_OFF),
             awbLock = awbLockAvailable,
             edgeOff = edgeModes.contains(CaptureRequest.EDGE_MODE_OFF),
@@ -589,7 +669,10 @@ class MainActivity : ComponentActivity() {
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
             .setBufferFormat(ImageFormat.YUV_420_888)
 
-        applyCamera2Interop(Camera2Interop.Extender(previewBuilder))
+        Camera2Interop.Extender(previewBuilder).also {
+            applyCamera2Interop(it)
+            it.setSessionCaptureCallback(captureResultCallback)
+        }
         applyCamera2Interop(Camera2Interop.Extender(imageCaptureBuilder))
 
         val preview = previewBuilder.build().also {
@@ -605,6 +688,19 @@ class MainActivity : ComponentActivity() {
         )
         boundSettings = settings
         appendLog("Camera bound with settings: $settings")
+        when {
+            scanLockedFocusDiopters != null -> updateFocusStatus(
+                "LOCKED for scan: ${"%.3f".format(Locale.US, scanLockedFocusDiopters)} D",
+            )
+            operatorLockedFocusDiopters != null -> updateFocusStatus(
+                "LOCKED by operator: ${"%.3f".format(Locale.US, operatorLockedFocusDiopters)} D",
+            )
+            settings.manualFocus -> updateFocusStatus(
+                "MANUAL: ${"%.3f".format(Locale.US, settings.focusDiopters)} D",
+            )
+            autoFocusEnabled -> updateFocusStatus("AUTO (continuous preview; locks during scan)")
+            else -> updateFocusStatus("AF lock requested")
+        }
     }
 
     private fun autofocusCenter() {
@@ -617,22 +713,50 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lockFocusAtCenter() {
-        focusAt(
+        lockFocusForOperator(
             previewView.width / 2.0f,
             previewView.height / 2.0f,
-            lock = true,
-            label = "Center focus lock",
+            "Center focus lock",
         )
     }
 
+    private fun lockFocusForOperator(x: Float, y: Float, label: String) {
+        focusAt(x, y, lock = true, label = label) {
+            val measured = lastLensFocusDiopters
+            if (manualSupport.focusDistance && measured != null) {
+                operatorLockedFocusDiopters = measured.coerceIn(
+                    0.0f,
+                    manualSupport.minimumFocusDistance,
+                )
+                appendLog(
+                    "Operator focus frozen at " +
+                        "${"%.3f".format(Locale.US, operatorLockedFocusDiopters)} D",
+                )
+                bindUseCases()
+            }
+        }
+    }
+
     private fun focusAt(x: Float, y: Float, lock: Boolean, label: String) {
+        focusAt(x, y, lock, label, null)
+    }
+
+    private fun focusAt(
+        x: Float,
+        y: Float,
+        lock: Boolean,
+        label: String,
+        onComplete: ((Boolean) -> Unit)?,
+    ) {
         val boundCamera = camera
         if (boundCamera == null) {
             appendLog("Focus lock skipped: camera is not bound")
+            onComplete?.invoke(false)
             return
         }
         if (settings.manualFocus) {
             appendLog("AF skipped because Manual focus distance is enabled")
+            onComplete?.invoke(false)
             return
         }
         val flags = if (settings.manualExposure) {
@@ -651,19 +775,52 @@ class MainActivity : ComponentActivity() {
         }
         val future = boundCamera.cameraControl.startFocusAndMetering(builder.build())
         future.addListener(
-            { appendLog("$label requested") },
+            {
+                val successful = try {
+                    future.get().isFocusSuccessful
+                } catch (exception: Exception) {
+                    appendLog("$label failed: ${exception.message}")
+                    false
+                }
+                val distance = lastLensFocusDiopters
+                val afState = lastAfState
+                appendLog(
+                    "$label completed: success=$successful " +
+                        "focus=${distance?.let { "%.3f D".format(Locale.US, it) } ?: "unknown"} " +
+                        "afState=${afState ?: "unknown"}",
+                )
+                if (lock) {
+                    updateFocusStatus(
+                        "LOCKED: ${distance?.let { "%.3f D".format(Locale.US, it) } ?: "camera AF position"}",
+                    )
+                }
+                onComplete?.invoke(successful)
+            },
             ContextCompat.getMainExecutor(this),
         )
     }
 
-    private fun unlockAutofocus() {
+    private fun setAutoFocusEnabled(enabled: Boolean) {
+        autoFocusEnabled = enabled
+        activeScanId = null
+        scanLockedFocusDiopters = null
+        if (!enabled) {
+            if (settings.manualFocus) {
+                updateFocusStatus("MANUAL: ${"%.3f".format(Locale.US, settings.focusDiopters)} D")
+            } else {
+                lockFocusAtCenter()
+            }
+            return
+        }
+        operatorLockedFocusDiopters = null
         if (settings.manualFocus) {
             settings = settings.copy(manualFocus = false)
             updateUiSettings()
             bindUseCases()
         }
         camera?.cameraControl?.cancelFocusAndMetering()
-        appendLog("AF unlocked; continuous autofocus can run if the camera supports it")
+        updateFocusStatus("AUTO (continuous preview; locks during scan)")
+        appendLog("AF resumed; continuous autofocus can run until capture starts")
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -685,7 +842,17 @@ class MainActivity : ComponentActivity() {
             appendLog("Manual exposure/ISO unsupported; camera will use auto exposure")
         }
 
-        if (settings.manualFocus && manualSupport.focusDistance) {
+        val lockedDistance = scanLockedFocusDiopters ?: operatorLockedFocusDiopters
+        if (lockedDistance != null && manualSupport.focusDistance) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_OFF,
+            )
+            extender.setCaptureRequestOption(
+                CaptureRequest.LENS_FOCUS_DISTANCE,
+                lockedDistance,
+            )
+        } else if (settings.manualFocus && manualSupport.focusDistance) {
             extender.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_OFF,
@@ -812,6 +979,13 @@ class MainActivity : ComponentActivity() {
         val settingsJson = command.optJSONObject("settings")
         val progress = captureProgressText(command, patternId)
 
+        if (activeScanId != scanId) {
+            activeScanId = scanId
+            scanLockedFocusDiopters = null
+            scanFocusPrepared = false
+            appendLog("New scan $scanId: autofocus will run once before the first capture")
+        }
+
         if (settingsJson != null) {
             val newSettings = settings.copy(
                 manualExposure = settingsJson.optBoolean("manual", settings.manualExposure),
@@ -837,9 +1011,44 @@ class MainActivity : ComponentActivity() {
 
         previewView.postDelayed(
             {
-                captureStill(command)
+                prepareFocusForCapture(command)
             },
             settleMs + if (boundSettings != settings) 250L else 0L,
+        )
+    }
+
+    private fun prepareFocusForCapture(command: JSONObject) {
+        if (settings.manualFocus || !autoFocusEnabled || scanFocusPrepared) {
+            captureStill(command)
+            return
+        }
+
+        updateFocusStatus("AUTOFOCUSING before scan capture...")
+        appendLog("Running one-shot center AF before scan; focus will remain fixed for all frames")
+        focusAt(
+            previewView.width / 2.0f,
+            previewView.height / 2.0f,
+            lock = true,
+            label = "Pre-scan AF lock",
+            onComplete = {
+                scanFocusPrepared = true
+                val measured = lastLensFocusDiopters
+                if (manualSupport.focusDistance && measured != null) {
+                    scanLockedFocusDiopters = measured.coerceIn(
+                        0.0f,
+                        manualSupport.minimumFocusDistance,
+                    )
+                    appendLog(
+                        "Scan focus frozen at " +
+                            "${"%.3f".format(Locale.US, scanLockedFocusDiopters)} D",
+                    )
+                    bindUseCases()
+                    previewView.postDelayed({ captureStill(command) }, 300L)
+                } else {
+                    appendLog("Lens distance unavailable; holding CameraX AF metering lock for this scan")
+                    captureStill(command)
+                }
+            },
         )
     }
 
@@ -1082,7 +1291,8 @@ class MainActivity : ComponentActivity() {
                 .addFormDataPart("iso", settingsJson.optInt("iso", settings.iso).toString())
                 .addFormDataPart(
                     "focus_diopters",
-                    settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()).toString(),
+                    ((scanLockedFocusDiopters ?: operatorLockedFocusDiopters)?.toDouble()
+                        ?: settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble())).toString(),
                 )
         }
 
@@ -1113,9 +1323,34 @@ class MainActivity : ComponentActivity() {
                         appendLog("Could not remove uploaded cache file: $filename")
                     }
                     sendCaptureDone(command, filename)
+                    finishScanFocusIfNeeded(command)
                 }
             },
         )
+    }
+
+    private fun finishScanFocusIfNeeded(command: JSONObject) {
+        val bracket = command.optJSONObject("bracket")
+        val bracketIndex = bracket?.optInt("index", 0) ?: 0
+        val bracketCount = bracket?.optInt("count", command.optInt("bracket_count", 1)) ?: 1
+        val lastPattern = command.optInt("pattern_sequence_index", 0) ==
+            command.optInt("pattern_count", 1) - 1
+        val lastAngle = command.optInt("angle_index", 0) ==
+            command.optInt("angle_count", 1) - 1
+        val lastBracket = bracketIndex == bracketCount - 1
+        if (!lastPattern || !lastAngle || !lastBracket) return
+
+        appendLog("Scan capture complete; releasing fixed focus and resuming preview AF")
+        activeScanId = null
+        scanFocusPrepared = false
+        scanLockedFocusDiopters = null
+        if (autoFocusEnabled && !settings.manualFocus) {
+            runOnUiThread {
+                bindUseCases()
+                camera?.cameraControl?.cancelFocusAndMetering()
+            }
+            updateFocusStatus("AUTO (continuous preview; locks during scan)")
+        }
     }
 
     private fun sendCaptureDone(command: JSONObject, filename: String) {
@@ -1148,7 +1383,8 @@ class MainActivity : ComponentActivity() {
                     .put("iso", settingsJson.optInt("iso", settings.iso))
                     .put(
                         "focus_diopters",
-                        settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()),
+                        (scanLockedFocusDiopters ?: operatorLockedFocusDiopters)?.toDouble()
+                            ?: settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()),
                     ),
             )
         }

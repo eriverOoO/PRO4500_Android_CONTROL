@@ -673,7 +673,11 @@ def create_app(state: ControllerState) -> FastAPI:
             "bracket_index": pending.bracket_index if pending else None,
             "exposure_us": pending.exposure_us if pending else exposure_us,
             "iso": pending.iso if pending else iso,
-            "focus_diopters": pending.focus_diopters if pending else focus_diopters,
+            "focus_diopters": (
+                pending.focus_diopters
+                if pending is not None and pending.focus_diopters is not None
+                else focus_diopters
+            ),
             "source_format": source_format,
             "encoded_format": encoded_format,
             "source_bit_depth": source_bit_depth,
@@ -895,6 +899,7 @@ def make_capture_message(
     pattern_count: int,
     bracket: ExposureBracket,
     bracket_index: int,
+    bracket_count: int,
     capture_id: int,
     angle_deg: int,
     angle_index: int,
@@ -918,6 +923,7 @@ def make_capture_message(
         "bracket_label": bracket.label,
         "bracket": {
             "index": bracket_index,
+            "count": bracket_count,
             "label": bracket.label,
             "exposure_us": bracket.exposure_us,
             "iso": bracket.iso,
@@ -1645,7 +1651,9 @@ async def run_scan(args: argparse.Namespace) -> int:
                                 bracket_index=bracket_index,
                                 exposure_us=bracket.exposure_us,
                                 iso=bracket.iso,
-                                focus_diopters=args.focus_diopters,
+                                focus_diopters=(
+                                    args.focus_diopters if args.manual_focus else None
+                                ),
                                 decode_dir=decode_dir,
                             )
                             message = make_capture_message(
@@ -1656,6 +1664,7 @@ async def run_scan(args: argparse.Namespace) -> int:
                                 pattern_count=len(capture_patterns),
                                 bracket=bracket,
                                 bracket_index=bracket_index,
+                                bracket_count=len(hdr_settings.brackets),
                                 capture_id=capture_id,
                                 angle_deg=angle,
                                 angle_index=angle_index,
@@ -1956,9 +1965,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iso", default=100, type=int)
     parser.add_argument(
         "--manual-focus",
-        default=True,
+        default=False,
         type=parse_bool,
-        help="Request fixed Camera2 focus distance on Android when PC settings are used.",
+        help=(
+            "Request a fixed Camera2 focus distance on Android. The default is false: "
+            "the phone autofocuses before the scan and locks that result during capture."
+        ),
     )
     parser.add_argument(
         "--awb-locked",
