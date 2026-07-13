@@ -4,13 +4,8 @@ import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
@@ -54,25 +49,99 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.zip.CRC32
+import java.util.zip.Deflater
+import java.util.zip.DeflaterOutputStream
+
+
+private const val FIXED_EXPOSURE_US = 10_000L
+private const val FIXED_ISO = 100
+private const val FIXED_FOCUS_DIOPTERS = 0.0f
+
+
+private data class GrayscaleFrame(
+    val pixels: ByteArray,
+    val width: Int,
+    val height: Int,
+)
+
+
+private class PngIdatOutputStream(
+    private val output: DataOutputStream,
+    bufferSize: Int,
+) : OutputStream() {
+    private val buffer = ByteArray(bufferSize)
+    private var count = 0
+
+    override fun write(value: Int) {
+        if (count == buffer.size) {
+            flushChunk()
+        }
+        buffer[count++] = value.toByte()
+    }
+
+    override fun write(source: ByteArray, offset: Int, length: Int) {
+        var sourceOffset = offset
+        var remaining = length
+        while (remaining > 0) {
+            if (count == buffer.size) {
+                flushChunk()
+            }
+            val copyLength = minOf(remaining, buffer.size - count)
+            source.copyInto(buffer, count, sourceOffset, sourceOffset + copyLength)
+            count += copyLength
+            sourceOffset += copyLength
+            remaining -= copyLength
+        }
+    }
+
+    override fun flush() {
+        flushChunk()
+        output.flush()
+    }
+
+    override fun close() {
+        flushChunk()
+    }
+
+    private fun flushChunk() {
+        if (count == 0) {
+            return
+        }
+        val typeBytes = byteArrayOf('I'.code.toByte(), 'D'.code.toByte(), 'A'.code.toByte(), 'T'.code.toByte())
+        val crc = CRC32().apply {
+            update(typeBytes)
+            update(buffer, 0, count)
+        }
+        output.writeInt(count)
+        output.write(typeBytes)
+        output.write(buffer, 0, count)
+        output.writeInt(crc.value.toInt())
+        count = 0
+    }
+}
 
 
 data class CameraSettings(
     val manualExposure: Boolean = true,
-    val exposureUs: Long = 10_000L,
-    val iso: Int = 100,
-    val manualFocus: Boolean = false,
-    val focusDiopters: Float = 0.0f,
-    val awbLocked: Boolean = false,
-    val usePcSettings: Boolean = false,
+    val exposureUs: Long = FIXED_EXPOSURE_US,
+    val iso: Int = FIXED_ISO,
+    val manualFocus: Boolean = true,
+    val focusDiopters: Float = FIXED_FOCUS_DIOPTERS,
+    val awbLocked: Boolean = true,
+    val usePcSettings: Boolean = true,
 )
 
 
@@ -84,6 +153,7 @@ data class ManualSupport(
     val afContinuous: Boolean = false,
     val focusDistance: Boolean = false,
     val awbOff: Boolean = false,
+    val awbLock: Boolean = false,
 ) {
     val canUseManual: Boolean
         get() = manualSensor && aeOff
@@ -364,10 +434,10 @@ class MainActivity : ComponentActivity() {
     private fun readUiSettings() {
         settings = CameraSettings(
             manualExposure = manualSwitch.isChecked,
-            exposureUs = exposureEdit.text.toString().toLongOrNull() ?: 10_000L,
-            iso = isoEdit.text.toString().toIntOrNull() ?: 100,
+            exposureUs = exposureEdit.text.toString().toLongOrNull() ?: FIXED_EXPOSURE_US,
+            iso = isoEdit.text.toString().toIntOrNull() ?: FIXED_ISO,
             manualFocus = manualFocusSwitch.isChecked,
-            focusDiopters = focusEdit.text.toString().toFloatOrNull() ?: 0.0f,
+            focusDiopters = focusEdit.text.toString().toFloatOrNull() ?: FIXED_FOCUS_DIOPTERS,
             awbLocked = awbLockSwitch.isChecked,
             usePcSettings = pcSettingsSwitch.isChecked,
         )
@@ -468,6 +538,7 @@ class MainActivity : ComponentActivity() {
         val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)?.toSet().orEmpty()
         val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toSet().orEmpty()
         val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet().orEmpty()
+        val awbLockAvailable = chars.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true
         val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0.0f
 
         manualSupport = ManualSupport(
@@ -480,6 +551,7 @@ class MainActivity : ComponentActivity() {
             afContinuous = afModes.contains(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE),
             focusDistance = minFocus > 0.0f,
             awbOff = awbModes.contains(CaptureRequest.CONTROL_AWB_MODE_OFF),
+            awbLock = awbLockAvailable,
         )
         appendLog("Back camera id=${manualSupport.cameraId}, manual support=$manualSupport")
     }
@@ -503,7 +575,7 @@ class MainActivity : ComponentActivity() {
         val imageCaptureBuilder = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-            .setJpegQuality(95)
+            .setBufferFormat(ImageFormat.YUV_420_888)
 
         applyCamera2Interop(Camera2Interop.Extender(previewBuilder))
         applyCamera2Interop(Camera2Interop.Extender(imageCaptureBuilder))
@@ -629,6 +701,11 @@ class MainActivity : ComponentActivity() {
                 CaptureRequest.CONTROL_AWB_MODE,
                 CaptureRequest.CONTROL_AWB_MODE_OFF,
             )
+        } else if (settings.awbLocked && manualSupport.awbLock) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AWB_LOCK,
+                true,
+            )
         } else if (settings.awbLocked) {
             appendLog("White balance lock unsupported; camera will use auto white balance")
         }
@@ -700,7 +777,7 @@ class MainActivity : ComponentActivity() {
         val settingsJson = command.optJSONObject("settings")
         val progress = captureProgressText(command, patternId)
 
-        if (settingsJson != null && settings.usePcSettings) {
+        if (settingsJson != null) {
             val newSettings = settings.copy(
                 manualExposure = settingsJson.optBoolean("manual", settings.manualExposure),
                 manualFocus = settingsJson.optBoolean("manual_focus", settings.manualFocus),
@@ -708,14 +785,13 @@ class MainActivity : ComponentActivity() {
                 exposureUs = settingsJson.optLong("exposure_us", settings.exposureUs),
                 iso = settingsJson.optInt("iso", settings.iso),
                 focusDiopters = settingsJson.optDouble("focus_diopters", settings.focusDiopters.toDouble()).toFloat(),
+                usePcSettings = true,
             )
             if (newSettings != settings) {
                 settings = newSettings
                 updateUiSettings()
                 bindUseCases()
             }
-        } else if (settingsJson != null && captureId == 0) {
-            appendLog("Using phone camera settings; PC camera settings ignored")
         }
 
         val settleMs = settingsJson?.optLong("settle_ms_before_capture", 0L) ?: 0L
@@ -733,8 +809,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun captureStill(command: JSONObject) {
-        // CameraX file output is JPEG-oriented, so capture in memory and encode
-        // PNG explicitly to make the saved file match its extension.
         val capture = imageCapture
         if (capture == null) {
             sendCaptureError(command, "ImageCapture is not ready")
@@ -761,25 +835,30 @@ class MainActivity : ComponentActivity() {
             "$angleDir/pattern_%03d".format(Locale.US, patternId),
         ).apply { mkdirs() }
         val outputFile = File(captureDir, filename)
+        val captureStartedNs = System.nanoTime()
 
         capture.takePicture(
             cameraExecutor,
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
                     try {
-                        val bitmap = imageProxyToBitmap(image)
-                        outputFile.outputStream().use { output ->
-                            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
-                                throw IOException("PNG encoder returned false")
-                            }
+                        val captureMs = elapsedMs(captureStartedNs)
+                        val encodeStartedNs = System.nanoTime()
+                        val frame = try {
+                            imageProxyToGrayscale(image)
+                        } finally {
+                            image.close()
                         }
-                        bitmap.recycle()
-                        appendLog("Saved local image: ${outputFile.name}")
+                        writeGrayscalePng(outputFile, frame)
+                        val encodeMs = elapsedMs(encodeStartedNs)
+                        appendLog(
+                            "Saved lossless grayscale PNG: ${outputFile.name} " +
+                                "${frame.width}x${frame.height}, ${outputFile.length() / 1024} KiB, " +
+                                "capture=${captureMs}ms encode=${encodeMs}ms",
+                        )
                         uploadCapture(command, outputFile)
                     } catch (exception: Exception) {
-                        sendCaptureError(command, "PNG save failed: ${exception.message}")
-                    } finally {
-                        image.close()
+                        sendCaptureError(command, "Lossless PNG save failed: ${exception.message}")
                     }
                 }
 
@@ -790,72 +869,125 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
-        val bitmap = when (image.format) {
-            ImageFormat.JPEG -> {
-                val buffer = image.planes[0].buffer
-                val bytes = ByteArray(buffer.remaining())
-                buffer.get(bytes)
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    ?: throw IOException("Failed to decode JPEG capture")
-            }
-            ImageFormat.YUV_420_888 -> {
-                val bytes = yuv420ToNv21(image)
-                val yuvImage = YuvImage(bytes, ImageFormat.NV21, image.width, image.height, null)
-                val jpegStream = ByteArrayOutputStream()
-                if (!yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 100, jpegStream)) {
-                    throw IOException("Failed to convert YUV capture")
-                }
-                val jpegBytes = jpegStream.toByteArray()
-                BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-                    ?: throw IOException("Failed to decode converted capture")
-            }
-            else -> throw IOException("Unsupported capture format: ${image.format}")
+    private fun imageProxyToGrayscale(image: ImageProxy): GrayscaleFrame {
+        if (image.format != ImageFormat.YUV_420_888 || image.planes.isEmpty()) {
+            throw IOException("Expected YUV capture, received format ${image.format}")
         }
 
+        val crop = image.cropRect
+        val width = crop.width()
+        val height = crop.height()
+        val plane = image.planes[0]
+        val buffer = plane.buffer.duplicate()
         val rotationDegrees = image.imageInfo.rotationDegrees
-        if (rotationDegrees == 0) {
-            return bitmap
+        val rotation = ((rotationDegrees % 360) + 360) % 360
+        if (rotation !in setOf(90, 180, 270)) {
+            if (rotation != 0) {
+                throw IOException("Unsupported capture rotation: $rotationDegrees")
+            }
         }
-        val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        bitmap.recycle()
-        return rotated
+
+        val destinationWidth = if (rotation == 0 || rotation == 180) width else height
+        val destinationHeight = if (rotation == 0 || rotation == 180) height else width
+        val destination = ByteArray(width * height)
+
+        for (sourceY in 0 until height) {
+            val rowOffset = (crop.top + sourceY) * plane.rowStride + crop.left * plane.pixelStride
+            if (rotation == 0 && plane.pixelStride == 1) {
+                buffer.position(rowOffset)
+                buffer.get(destination, sourceY * width, width)
+                continue
+            }
+            for (sourceX in 0 until width) {
+                val destinationX: Int
+                val destinationY: Int
+                when (rotation) {
+                    0 -> {
+                        destinationX = sourceX
+                        destinationY = sourceY
+                    }
+                    90 -> {
+                        destinationX = height - 1 - sourceY
+                        destinationY = sourceX
+                    }
+                    180 -> {
+                        destinationX = width - 1 - sourceX
+                        destinationY = height - 1 - sourceY
+                    }
+                    else -> {
+                        destinationX = sourceY
+                        destinationY = width - 1 - sourceX
+                    }
+                }
+                destination[destinationY * destinationWidth + destinationX] =
+                    buffer.get(rowOffset + sourceX * plane.pixelStride)
+            }
+        }
+        return GrayscaleFrame(destination, destinationWidth, destinationHeight)
     }
 
-    private fun yuv420ToNv21(image: ImageProxy): ByteArray {
-        val yPlane = image.planes[0]
-        val uPlane = image.planes[1]
-        val vPlane = image.planes[2]
-        val width = image.width
-        val height = image.height
-        val nv21 = ByteArray(width * height * 3 / 2)
+    private fun writeGrayscalePng(file: File, frame: GrayscaleFrame) {
+        DataOutputStream(BufferedOutputStream(file.outputStream(), 64 * 1024)).use { output ->
+            output.write(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10))
 
-        var outputOffset = 0
-        val yBuffer = yPlane.buffer
-        for (row in 0 until height) {
-            yBuffer.position(row * yPlane.rowStride)
-            yBuffer.get(nv21, outputOffset, width)
-            outputOffset += width
-        }
-
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-        val chromaHeight = height / 2
-        val chromaWidth = width / 2
-        for (row in 0 until chromaHeight) {
-            for (col in 0 until chromaWidth) {
-                val vIndex = row * vPlane.rowStride + col * vPlane.pixelStride
-                val uIndex = row * uPlane.rowStride + col * uPlane.pixelStride
-                nv21[outputOffset++] = vBuffer.get(vIndex)
-                nv21[outputOffset++] = uBuffer.get(uIndex)
+            val headerBytes = ByteArrayOutputStream(13)
+            DataOutputStream(headerBytes).use { header ->
+                header.writeInt(frame.width)
+                header.writeInt(frame.height)
+                header.writeByte(8)
+                header.writeByte(0) // Grayscale, one byte per pixel.
+                header.writeByte(0)
+                header.writeByte(0)
+                header.writeByte(0)
             }
+            writePngChunk(output, "IHDR", headerBytes.toByteArray())
+
+            val deflater = Deflater(Deflater.BEST_SPEED)
+            try {
+                DeflaterOutputStream(
+                    PngIdatOutputStream(output, 64 * 1024),
+                    deflater,
+                    64 * 1024,
+                ).use { stream ->
+                    val filteredRow = ByteArray(frame.width + 1)
+                    filteredRow[0] = 1 // PNG Sub filter; effective for projected stripe patterns.
+                    for (row in 0 until frame.height) {
+                        val rowOffset = row * frame.width
+                        var left = 0
+                        for (column in 0 until frame.width) {
+                            val value = frame.pixels[rowOffset + column].toInt() and 0xff
+                            filteredRow[column + 1] = (value - left).toByte()
+                            left = value
+                        }
+                        stream.write(filteredRow)
+                    }
+                }
+            } finally {
+                deflater.end()
+            }
+            writePngChunk(output, "IEND", ByteArray(0))
         }
-        return nv21
+    }
+
+    private fun writePngChunk(output: DataOutputStream, type: String, data: ByteArray) {
+        val typeBytes = type.toByteArray(Charsets.US_ASCII)
+        val crc = CRC32().apply {
+            update(typeBytes)
+            update(data)
+        }
+        output.writeInt(data.size)
+        output.write(typeBytes)
+        output.write(data)
+        output.writeInt(crc.value.toInt())
+    }
+
+    private fun elapsedMs(startedNs: Long): Long {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNs)
     }
 
     private fun uploadCapture(command: JSONObject, file: File) {
         setStatus("uploading")
+        val uploadStartedNs = System.nanoTime()
         val scanId = command.getString("scan_id")
         val patternId = command.getInt("pattern_id")
         val captureId = command.getInt("capture_id")
@@ -910,7 +1042,15 @@ class MainActivity : ComponentActivity() {
                             return
                         }
                     }
-                    sendCaptureDone(command, file.name)
+                    val filename = file.name
+                    appendLog(
+                        "Upload complete: $filename ${file.length() / 1024} KiB " +
+                            "in ${elapsedMs(uploadStartedNs)}ms",
+                    )
+                    if (!file.delete()) {
+                        appendLog("Could not remove uploaded cache file: $filename")
+                    }
+                    sendCaptureDone(command, filename)
                 }
             },
         )
