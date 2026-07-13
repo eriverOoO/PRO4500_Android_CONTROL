@@ -154,6 +154,10 @@ data class ManualSupport(
     val focusDistance: Boolean = false,
     val awbOff: Boolean = false,
     val awbLock: Boolean = false,
+    val edgeOff: Boolean = false,
+    val noiseReductionOff: Boolean = false,
+    val aberrationCorrectionOff: Boolean = false,
+    val linearGamma: Boolean = false,
 ) {
     val canUseManual: Boolean
         get() = manualSensor && aeOff
@@ -539,6 +543,10 @@ class MainActivity : ComponentActivity() {
         val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toSet().orEmpty()
         val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toSet().orEmpty()
         val awbLockAvailable = chars.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true
+        val edgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toSet().orEmpty()
+        val noiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toSet().orEmpty()
+        val aberrationModes = chars.get(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES)?.toSet().orEmpty()
+        val tonemapModes = chars.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES)?.toSet().orEmpty()
         val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0.0f
 
         manualSupport = ManualSupport(
@@ -552,6 +560,10 @@ class MainActivity : ComponentActivity() {
             focusDistance = minFocus > 0.0f,
             awbOff = awbModes.contains(CaptureRequest.CONTROL_AWB_MODE_OFF),
             awbLock = awbLockAvailable,
+            edgeOff = edgeModes.contains(CaptureRequest.EDGE_MODE_OFF),
+            noiseReductionOff = noiseModes.contains(CaptureRequest.NOISE_REDUCTION_MODE_OFF),
+            aberrationCorrectionOff = aberrationModes.contains(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_OFF),
+            linearGamma = tonemapModes.contains(CaptureRequest.TONEMAP_MODE_GAMMA_VALUE),
         )
         appendLog("Back camera id=${manualSupport.cameraId}, manual support=$manualSupport")
     }
@@ -573,7 +585,7 @@ class MainActivity : ComponentActivity() {
 
         val previewBuilder = Preview.Builder()
         val imageCaptureBuilder = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setFlashMode(ImageCapture.FLASH_MODE_OFF)
             .setBufferFormat(ImageFormat.YUV_420_888)
 
@@ -696,18 +708,41 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        if (settings.awbLocked && manualSupport.awbOff) {
-            extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AWB_MODE,
-                CaptureRequest.CONTROL_AWB_MODE_OFF,
-            )
-        } else if (settings.awbLocked && manualSupport.awbLock) {
+        if (settings.awbLocked && manualSupport.awbLock) {
             extender.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AWB_LOCK,
                 true,
             )
+        } else if (settings.awbLocked && manualSupport.awbOff) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AWB_MODE,
+                CaptureRequest.CONTROL_AWB_MODE_OFF,
+            )
         } else if (settings.awbLocked) {
             appendLog("White balance lock unsupported; camera will use auto white balance")
+        }
+
+        if (manualSupport.edgeOff) {
+            extender.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+        }
+        if (manualSupport.noiseReductionOff) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.NOISE_REDUCTION_MODE,
+                CaptureRequest.NOISE_REDUCTION_MODE_OFF,
+            )
+        }
+        if (manualSupport.aberrationCorrectionOff) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
+                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_OFF,
+            )
+        }
+        if (manualSupport.linearGamma) {
+            extender.setCaptureRequestOption(
+                CaptureRequest.TONEMAP_MODE,
+                CaptureRequest.TONEMAP_MODE_GAMMA_VALUE,
+            )
+            extender.setCaptureRequestOption(CaptureRequest.TONEMAP_GAMMA, 1.0f)
         }
     }
 
@@ -959,7 +994,9 @@ class MainActivity : ComponentActivity() {
             }
             writePngChunk(output, "IHDR", headerBytes.toByteArray())
 
-            val deflater = Deflater(Deflater.BEST_SPEED)
+            // Level 3 reduces Wi-Fi payload substantially while keeping capture latency low.
+            // DEFLATE and PNG row filtering are fully lossless at every compression level.
+            val deflater = Deflater(3)
             try {
                 DeflaterOutputStream(
                     PngIdatOutputStream(output, 64 * 1024),
@@ -1028,6 +1065,7 @@ class MainActivity : ComponentActivity() {
             .addFormDataPart("source_format", "YUV_420_888")
             .addFormDataPart("encoded_format", "rgb_png")
             .addFormDataPart("source_bit_depth", "8")
+            .addFormDataPart("compression", "png_deflate_level_3_lossless")
         if (command.has("angle_deg")) {
             bodyBuilder.addFormDataPart("angle_deg", command.optInt("angle_deg").toString())
         }

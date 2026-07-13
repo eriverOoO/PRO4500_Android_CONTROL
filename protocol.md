@@ -163,14 +163,18 @@ Fields:
 - `exposure_us`
 - `iso`
 - `focus_diopters`
+- `source_format`
+- `encoded_format`
+- `source_bit_depth`
+- `compression`
 - `file`
 
 During the synchronized PC workflow, uploads are saved into the decoder folder:
 
 ```text
-captures/<scan_id>/angle_000/exposures/pattern_000/single.png  # retained only when requested
+captures/<scan_id>/raw/angle_000/single/pattern_000.png  # retained only when requested
 captures/<scan_id>/angle_000/pattern_000.png
-captures/<scan_id>/angle_180/exposures/pattern_000/single.png  # retained only when requested
+captures/<scan_id>/raw/angle_180/single/pattern_000.png  # retained only when requested
 captures/<scan_id>/angle_180/pattern_000.png
 ```
 

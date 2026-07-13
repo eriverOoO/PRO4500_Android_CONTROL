@@ -278,7 +278,9 @@ def read_measurement_channel(path: Path, channel: str) -> np.ndarray:
 
 def write_image(path: Path, image: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok, encoded = cv2.imencode(path.suffix or ".png", image)
+    suffix = path.suffix or ".png"
+    params = [cv2.IMWRITE_PNG_COMPRESSION, 3] if suffix.lower() == ".png" else []
+    ok, encoded = cv2.imencode(suffix, image, params)
     if not ok:
         raise OSError(f"Could not encode image: {path}")
     path.write_bytes(encoded.tobytes())
@@ -609,6 +611,7 @@ def create_app(state: ControllerState) -> FastAPI:
         source_format: str | None = Form(None),
         encoded_format: str | None = Form(None),
         source_bit_depth: int | None = Form(None),
+        compression: str | None = Form(None),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
         scan_id = safe_scan_id(scan_id)
@@ -674,6 +677,7 @@ def create_app(state: ControllerState) -> FastAPI:
             "source_format": source_format,
             "encoded_format": encoded_format,
             "source_bit_depth": source_bit_depth,
+            "compression": compression,
         }
         state.resolve_upload(upload_record)
         print(f"[upload] saved {filename} ({size_bytes} bytes)")
@@ -1131,6 +1135,7 @@ def merge_hdr_pattern(
                 "source_format": record.get("source_format"),
                 "encoded_format": record.get("encoded_format"),
                 "source_bit_depth": record.get("source_bit_depth"),
+                "compression": record.get("compression"),
             }
             for record in records
         ],

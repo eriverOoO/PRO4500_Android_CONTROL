@@ -251,18 +251,33 @@ captures/
     pattern_001.png
     ...
     pattern_021.png
-    exposures/                  # optional: Keep exposure originals
-      pattern_000/
-        short.png
-        mid.png
-        long.png
     hdr_masks/                  # optional: Keep HDR masks
       pattern_000_saturated.png
       pattern_000_dark.png
+    channel_quality_report.json
     scan_log.json
     hdr_merge_report.json
     scan_log.csv
+  raw/                          # optional: Keep exposure originals
+    angle_000/
+      short/
+        pattern_000.png         # lossless RGB converted from YUV_420_888
+      mid/
+      long/
 ```
+
+The Android camera uploads lossless RGB PNG frames converted from CameraX
+`YUV_420_888`. The PC uses one fixed measurement channel (`blue` by default)
+for every Gray-code and phase frame and writes decoder-ready `pattern_###.png`
+files as mono16. The source is currently 8-bit YUV, so mono16 is a linear
+processing container and does not create additional sensor precision.
+`channel_quality_report.json` compares R/G/B 4-step modulation, saturation,
+and dark ratios for selecting the channel on later scans.
+
+RGB source and mono16 decoder images use lossless PNG DEFLATE level 3. This
+changes only storage size and transfer time: pixel values are not quantized,
+resampled, or converted to JPEG. Android uploads from the file as a stream and
+the PC writes the multipart payload in 1 MiB chunks.
 
 `scan_log.json`에는 pattern id, label, 최종 파일명, 브라켓 파일명, exposure_us, ISO, focus, scan_type, projector_tilt_deg, keystone_predistortion 정보가 기록됩니다. 실제 휴대폰 없이 저장 포맷을 검증하려면:
 

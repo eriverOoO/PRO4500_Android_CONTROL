@@ -124,6 +124,10 @@ captures/<scan_id>/angle_000/
 
 디코더 입력용 최종 이미지는 항상 `pattern_XXX.png`로 저장됩니다. `exposures/` 원본과 `hdr_masks/` 진단 마스크는 기본적으로 병합 직후 제거됩니다. 재병합이나 노출 품질 점검이 필요할 때만 GUI의 `Keep exposure originals`, `Keep HDR masks`를 선택합니다.
 
+현재 Android 경로는 CameraX `YUV_420_888`을 무손실 RGB PNG로 변환해 업로드합니다. PC는 GUI의 `Channel` 값(기본 `blue`)을 모든 Gray/PSP 프레임에 동일하게 적용하고 최종 이미지를 mono16 PNG로 기록합니다. 원본 보관을 선택하면 `raw/angle_XXX/<bracket>/pattern_XXX.png` 구조로 RGB가 남습니다. `channel_quality_report.json`에는 4-step 사인 프레임의 R/G/B 변조, 포화, 암부 비율과 다음 촬영 권장 채널이 기록됩니다.
+
+mono16은 현재 8-bit YUV 소스를 선형적으로 담는 컨테이너이므로 센서 유효 비트가 증가하는 것은 아닙니다. RAW_SENSOR/DNG는 CameraX ImageCapture와 별도의 Camera2 캡처 세션이 필요한 후속 확장 항목입니다.
+
 ## 4단계: 0도/180도 촬영
 
 기본 각도 목록은 `0,180`입니다. 각도마다 같은 22프레임 패턴 세트를 촬영합니다.
