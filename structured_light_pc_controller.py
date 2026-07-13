@@ -263,6 +263,19 @@ def read_gray_image(path: Path) -> np.ndarray:
     return image
 
 
+def read_measurement_channel(path: Path, channel: str) -> np.ndarray:
+    data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise SystemExit(f"Could not decode measurement image: {path}")
+    if image.ndim == 2:
+        return image
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise SystemExit(f"Unsupported measurement image shape {image.shape}: {path}")
+    channel_index = {"blue": 0, "green": 1, "red": 2}[channel]
+    return image[:, :, channel_index]
+
+
 def write_image(path: Path, image: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ok, encoded = cv2.imencode(path.suffix or ".png", image)
@@ -593,6 +606,9 @@ def create_app(state: ControllerState) -> FastAPI:
         exposure_us: int | None = Form(None),
         iso: int | None = Form(None),
         focus_diopters: float | None = Form(None),
+        source_format: str | None = Form(None),
+        encoded_format: str | None = Form(None),
+        source_bit_depth: int | None = Form(None),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
         scan_id = safe_scan_id(scan_id)
@@ -606,11 +622,12 @@ def create_app(state: ControllerState) -> FastAPI:
 
         if pending is not None and pending.decode_dir is not None:
             label = safe_filename_stem(pending.bracket_label or bracket_label or "frame")
-            filename = f"{label}{suffix}"
+            filename = f"pattern_{pattern_id:03d}{suffix}"
             destination = (
-                pending.decode_dir
-                / "exposures"
-                / f"pattern_{pattern_id:03d}"
+                scan_dir
+                / "raw"
+                / f"angle_{pending.angle_deg:03d}"
+                / label
                 / filename
             )
         else:
@@ -654,6 +671,9 @@ def create_app(state: ControllerState) -> FastAPI:
             "exposure_us": pending.exposure_us if pending else exposure_us,
             "iso": pending.iso if pending else iso,
             "focus_diopters": pending.focus_diopters if pending else focus_diopters,
+            "source_format": source_format,
+            "encoded_format": encoded_format,
+            "source_bit_depth": source_bit_depth,
         }
         state.resolve_upload(upload_record)
         print(f"[upload] saved {filename} ({size_bytes} bytes)")
@@ -929,6 +949,69 @@ def selected_counts(selected_index: np.ndarray, brackets: list[ExposureBracket])
     return counts
 
 
+def sample_rgb_for_channel_quality(
+    bracket_records: list[dict[str, Any]], sample_step: int = 8
+) -> np.ndarray | None:
+    if not bracket_records:
+        return None
+    ordered = sorted(
+        bracket_records,
+        key=lambda record: int(record["exposure_us"]) * int(record["iso"]),
+    )
+    record = ordered[len(ordered) // 2]
+    data = np.frombuffer(Path(record["path"]).read_bytes(), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if image is None:
+        return None
+    return image[::sample_step, ::sample_step].astype(np.float32)
+
+
+def write_channel_quality_report(
+    decode_dir: Path,
+    frames: dict[int, np.ndarray],
+    selected_channel: str,
+    saturated_threshold: int,
+    dark_threshold: int,
+) -> None:
+    if not all(pattern_id in frames for pattern_id in (10, 11, 12, 13)):
+        return
+    channel_indices = {"blue": 0, "green": 1, "red": 2}
+    channels: dict[str, dict[str, float]] = {}
+    for channel, index in channel_indices.items():
+        i0, i90, i180, i270 = (
+            frames[pattern_id][:, :, index] for pattern_id in (10, 11, 12, 13)
+        )
+        modulation = 0.5 * np.sqrt((i270 - i90) ** 2 + (i0 - i180) ** 2)
+        stack = np.stack((i0, i90, i180, i270), axis=0)
+        saturation_ratio = float(np.count_nonzero(np.any(stack >= saturated_threshold, axis=0)) / modulation.size)
+        dark_ratio = float(np.count_nonzero(np.all(stack <= dark_threshold, axis=0)) / modulation.size)
+        valid_ratio = float(np.count_nonzero(modulation >= 5.0) / modulation.size)
+        median_modulation = float(np.median(modulation))
+        channels[channel] = {
+            "median_modulation": median_modulation,
+            "p90_modulation": float(np.percentile(modulation, 90)),
+            "saturation_ratio": saturation_ratio,
+            "dark_ratio": dark_ratio,
+            "valid_modulation_ratio": valid_ratio,
+            "selection_score": median_modulation * valid_ratio * (1.0 - saturation_ratio),
+        }
+    recommended = max(channels, key=lambda name: channels[name]["selection_score"])
+    report = {
+        "method": "4_step_phase_rgb_channel_screening",
+        "sample_step": 8,
+        "selected_channel": selected_channel,
+        "recommended_channel_for_next_scan": recommended,
+        "channels": channels,
+        "notes": [
+            "The selected channel is fixed for every Gray-code and phase frame in this scan.",
+            "The recommendation is diagnostic; repeatability and flat-plane phase noise still require repeated scans.",
+        ],
+    }
+    (decode_dir / "channel_quality_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def merge_hdr_pattern(
     *,
     decode_dir: Path,
@@ -937,6 +1020,7 @@ def merge_hdr_pattern(
     bracket_records: list[dict[str, Any]],
     hdr_settings: HdrSettings,
     retain_hdr_masks: bool,
+    measurement_channel: str,
 ) -> dict[str, Any]:
     if not bracket_records:
         raise RuntimeError(f"No bracket frames for pattern {pattern.pattern_id:03d}")
@@ -948,7 +1032,10 @@ def merge_hdr_pattern(
             int(record.get("bracket_index", 0)),
         ),
     )
-    images = [read_gray_image(Path(record["path"])) for record in records]
+    images = [
+        read_measurement_channel(Path(record["path"]), measurement_channel)
+        for record in records
+    ]
     shape = images[0].shape
     if any(image.shape != shape for image in images):
         raise RuntimeError(f"HDR bracket image sizes do not match for {pattern.label}")
@@ -1021,6 +1108,7 @@ def merge_hdr_pattern(
             "saturated_mask": saturated_mask_path,
             "dark_mask": dark_mask_path,
             "masks_retained": retain_hdr_masks,
+            "measurement_channel": measurement_channel,
         },
         "captures": [
             {
@@ -1040,13 +1128,18 @@ def merge_hdr_pattern(
                 ),
                 "upload_timestamp_pc_ms": record.get("upload_timestamp_pc_ms"),
                 "timestamp_phone_ms": record.get("timestamp_phone_ms"),
+                "source_format": record.get("source_format"),
+                "encoded_format": record.get("encoded_format"),
+                "source_bit_depth": record.get("source_bit_depth"),
             }
             for record in records
         ],
     }
 
 
-def remove_bracket_frames(bracket_records: list[dict[str, Any]]) -> None:
+def remove_bracket_frames(
+    bracket_records: list[dict[str, Any]], scan_dir: Path
+) -> None:
     """Remove temporary upload frames after their merged decoder image is written."""
     directories: set[Path] = set()
     for record in bracket_records:
@@ -1057,13 +1150,16 @@ def remove_bracket_frames(bracket_records: list[dict[str, Any]]) -> None:
         except FileNotFoundError:
             continue
 
+    scan_root = scan_dir.resolve()
     for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
-        try:
-            directory.rmdir()
-            if directory.parent.name == "exposures":
-                directory.parent.rmdir()
-        except OSError:
-            pass
+        current = directory
+        while current != scan_root:
+            try:
+                current.resolve().relative_to(scan_root)
+                current.rmdir()
+            except (OSError, ValueError):
+                break
+            current = current.parent
 
 
 def write_decode_logs(
@@ -1199,6 +1295,7 @@ async def run_scan(args: argparse.Namespace) -> int:
 
     scan_rows: list[dict[str, Any]] = []
     decode_records: dict[str, list[dict[str, Any]]] = {}
+    channel_quality_frames: dict[str, dict[int, np.ndarray]] = {}
     display: PatternDisplay | None = None
     capture_id = 0
     aborted = False
@@ -1264,6 +1361,12 @@ async def run_scan(args: argparse.Namespace) -> int:
         pattern: PatternSpec,
         bracket_records: list[dict[str, Any]],
     ) -> None:
+        if pattern.pattern_id in {10, 11, 12, 13}:
+            sample = sample_rgb_for_channel_quality(bracket_records)
+            if sample is not None:
+                channel_quality_frames.setdefault(str(decode_dir), {})[
+                    pattern.pattern_id
+                ] = sample
         record = merge_hdr_pattern(
             decode_dir=decode_dir,
             scan_dir=scan_dir,
@@ -1271,6 +1374,7 @@ async def run_scan(args: argparse.Namespace) -> int:
             bracket_records=bracket_records,
             hdr_settings=hdr_settings,
             retain_hdr_masks=args.retain_hdr_masks,
+            measurement_channel=args.measurement_channel,
         )
         add_decode_record(decode_dir, record)
         print(
@@ -1278,7 +1382,7 @@ async def run_scan(args: argparse.Namespace) -> int:
             f"label={pattern.label} -> {decode_dir / record['filename']}"
         )
         if not args.retain_raw_exposures:
-            remove_bracket_frames(bracket_records)
+            remove_bracket_frames(bracket_records, scan_dir)
 
     try:
         if args.dry_run:
@@ -1292,10 +1396,11 @@ async def run_scan(args: argparse.Namespace) -> int:
                         display_ts = now_ms()
                         command_ts = display_ts
                         destination = (
-                            decode_dir
-                            / "exposures"
-                            / f"pattern_{pattern.pattern_id:03d}"
-                            / f"{bracket.label}.png"
+                            scan_dir
+                            / "raw"
+                            / f"angle_{angle:03d}"
+                            / bracket.label
+                            / f"pattern_{pattern.pattern_id:03d}.png"
                         )
                         make_synthetic_capture(
                             pattern=pattern,
@@ -1594,6 +1699,15 @@ async def run_scan(args: argparse.Namespace) -> int:
             expected_ids=expected_ids,
         )
 
+        for decode_dir_text, frames in channel_quality_frames.items():
+            write_channel_quality_report(
+                Path(decode_dir_text),
+                frames,
+                args.measurement_channel,
+                hdr_settings.saturated_threshold,
+                hdr_settings.dark_threshold,
+            )
+
         log = {
             "scan_id": scan_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1639,6 +1753,8 @@ async def run_scan(args: argparse.Namespace) -> int:
                 ],
                 "raw_exposures_retained": args.retain_raw_exposures,
                 "masks_retained": args.retain_hdr_masks,
+                "measurement_channel": args.measurement_channel,
+                "decoder_images": "mono16" if hdr_settings.bit_depth == 16 else "mono8",
             },
             "decoder_contract": [
                 {
@@ -1755,7 +1871,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--saturated-threshold", default=250, type=int)
     parser.add_argument("--dark-threshold", default=5, type=int)
-    parser.add_argument("--hdr-bit-depth", default=8, type=int, choices=(8, 16))
+    parser.add_argument("--hdr-bit-depth", default=16, type=int, choices=(8, 16))
+    parser.add_argument(
+        "--measurement-channel",
+        default="blue",
+        choices=("blue", "green", "red"),
+        help="RGB channel used consistently for all Gray-code and phase images.",
+    )
     parser.add_argument(
         "--retain-raw-exposures",
         action="store_true",

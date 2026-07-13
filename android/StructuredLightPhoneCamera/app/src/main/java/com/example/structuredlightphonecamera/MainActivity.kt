@@ -71,7 +71,7 @@ private const val FIXED_ISO = 100
 private const val FIXED_FOCUS_DIOPTERS = 0.0f
 
 
-private data class GrayscaleFrame(
+private data class RgbFrame(
     val pixels: ByteArray,
     val width: Int,
     val height: Int,
@@ -845,20 +845,20 @@ class MainActivity : ComponentActivity() {
                         val captureMs = elapsedMs(captureStartedNs)
                         val encodeStartedNs = System.nanoTime()
                         val frame = try {
-                            imageProxyToGrayscale(image)
+                            imageProxyToRgb(image)
                         } finally {
                             image.close()
                         }
-                        writeGrayscalePng(outputFile, frame)
+                        writeRgbPng(outputFile, frame)
                         val encodeMs = elapsedMs(encodeStartedNs)
                         appendLog(
-                            "Saved lossless grayscale PNG: ${outputFile.name} " +
+                            "Saved lossless RGB PNG from YUV_420_888: ${outputFile.name} " +
                                 "${frame.width}x${frame.height}, ${outputFile.length() / 1024} KiB, " +
                                 "capture=${captureMs}ms encode=${encodeMs}ms",
                         )
                         uploadCapture(command, outputFile)
                     } catch (exception: Exception) {
-                        sendCaptureError(command, "Lossless PNG save failed: ${exception.message}")
+                        sendCaptureError(command, "Lossless RGB PNG save failed: ${exception.message}")
                     }
                 }
 
@@ -869,16 +869,20 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun imageProxyToGrayscale(image: ImageProxy): GrayscaleFrame {
-        if (image.format != ImageFormat.YUV_420_888 || image.planes.isEmpty()) {
+    private fun imageProxyToRgb(image: ImageProxy): RgbFrame {
+        if (image.format != ImageFormat.YUV_420_888 || image.planes.size < 3) {
             throw IOException("Expected YUV capture, received format ${image.format}")
         }
 
         val crop = image.cropRect
         val width = crop.width()
         val height = crop.height()
-        val plane = image.planes[0]
-        val buffer = plane.buffer.duplicate()
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuffer = yPlane.buffer.duplicate()
+        val uBuffer = uPlane.buffer.duplicate()
+        val vBuffer = vPlane.buffer.duplicate()
         val rotationDegrees = image.imageInfo.rotationDegrees
         val rotation = ((rotationDegrees % 360) + 360) % 360
         if (rotation !in setOf(90, 180, 270)) {
@@ -889,15 +893,9 @@ class MainActivity : ComponentActivity() {
 
         val destinationWidth = if (rotation == 0 || rotation == 180) width else height
         val destinationHeight = if (rotation == 0 || rotation == 180) height else width
-        val destination = ByteArray(width * height)
+        val destination = ByteArray(width * height * 3)
 
         for (sourceY in 0 until height) {
-            val rowOffset = (crop.top + sourceY) * plane.rowStride + crop.left * plane.pixelStride
-            if (rotation == 0 && plane.pixelStride == 1) {
-                buffer.position(rowOffset)
-                buffer.get(destination, sourceY * width, width)
-                continue
-            }
             for (sourceX in 0 until width) {
                 val destinationX: Int
                 val destinationY: Int
@@ -919,14 +917,33 @@ class MainActivity : ComponentActivity() {
                         destinationY = width - 1 - sourceX
                     }
                 }
-                destination[destinationY * destinationWidth + destinationX] =
-                    buffer.get(rowOffset + sourceX * plane.pixelStride)
+                val absoluteX = crop.left + sourceX
+                val absoluteY = crop.top + sourceY
+                val y = yBuffer.get(
+                    absoluteY * yPlane.rowStride + absoluteX * yPlane.pixelStride,
+                ).toInt() and 0xff
+                val chromaX = absoluteX / 2
+                val chromaY = absoluteY / 2
+                val u = (uBuffer.get(
+                    chromaY * uPlane.rowStride + chromaX * uPlane.pixelStride,
+                ).toInt() and 0xff) - 128
+                val v = (vBuffer.get(
+                    chromaY * vPlane.rowStride + chromaX * vPlane.pixelStride,
+                ).toInt() and 0xff) - 128
+                val c = maxOf(0, y - 16)
+                val r = ((298 * c + 409 * v + 128) shr 8).coerceIn(0, 255)
+                val g = ((298 * c - 100 * u - 208 * v + 128) shr 8).coerceIn(0, 255)
+                val b = ((298 * c + 516 * u + 128) shr 8).coerceIn(0, 255)
+                val destinationOffset = (destinationY * destinationWidth + destinationX) * 3
+                destination[destinationOffset] = r.toByte()
+                destination[destinationOffset + 1] = g.toByte()
+                destination[destinationOffset + 2] = b.toByte()
             }
         }
-        return GrayscaleFrame(destination, destinationWidth, destinationHeight)
+        return RgbFrame(destination, destinationWidth, destinationHeight)
     }
 
-    private fun writeGrayscalePng(file: File, frame: GrayscaleFrame) {
+    private fun writeRgbPng(file: File, frame: RgbFrame) {
         DataOutputStream(BufferedOutputStream(file.outputStream(), 64 * 1024)).use { output ->
             output.write(byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10))
 
@@ -935,7 +952,7 @@ class MainActivity : ComponentActivity() {
                 header.writeInt(frame.width)
                 header.writeInt(frame.height)
                 header.writeByte(8)
-                header.writeByte(0) // Grayscale, one byte per pixel.
+                header.writeByte(2) // RGB, three bytes per pixel.
                 header.writeByte(0)
                 header.writeByte(0)
                 header.writeByte(0)
@@ -949,15 +966,19 @@ class MainActivity : ComponentActivity() {
                     deflater,
                     64 * 1024,
                 ).use { stream ->
-                    val filteredRow = ByteArray(frame.width + 1)
+                    val rowBytes = frame.width * 3
+                    val filteredRow = ByteArray(rowBytes + 1)
                     filteredRow[0] = 1 // PNG Sub filter; effective for projected stripe patterns.
                     for (row in 0 until frame.height) {
-                        val rowOffset = row * frame.width
-                        var left = 0
-                        for (column in 0 until frame.width) {
+                        val rowOffset = row * rowBytes
+                        for (column in 0 until rowBytes) {
                             val value = frame.pixels[rowOffset + column].toInt() and 0xff
+                            val left = if (column >= 3) {
+                                frame.pixels[rowOffset + column - 3].toInt() and 0xff
+                            } else {
+                                0
+                            }
                             filteredRow[column + 1] = (value - left).toByte()
-                            left = value
                         }
                         stream.write(filteredRow)
                     }
@@ -1004,6 +1025,9 @@ class MainActivity : ComponentActivity() {
                 file.name,
                 file.asRequestBody("image/png".toMediaType()),
             )
+            .addFormDataPart("source_format", "YUV_420_888")
+            .addFormDataPart("encoded_format", "rgb_png")
+            .addFormDataPart("source_bit_depth", "8")
         if (command.has("angle_deg")) {
             bodyBuilder.addFormDataPart("angle_deg", command.optInt("angle_deg").toString())
         }

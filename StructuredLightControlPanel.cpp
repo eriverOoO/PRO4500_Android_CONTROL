@@ -48,6 +48,7 @@ enum ControlId {
     IDC_BIDIRECTIONAL_ANALYSIS,
     IDC_HDR_ENABLE,
     IDC_HDR_BRACKETS,
+    IDC_MEASUREMENT_CHANNEL,
     IDC_RETAIN_RAW_EXPOSURES,
     IDC_RETAIN_HDR_MASKS,
     IDC_LOG,
@@ -88,6 +89,7 @@ struct AppState {
     HWND bidirectionalAnalysis{};
     HWND hdrEnable{};
     HWND hdrBrackets{};
+    HWND measurementChannel{};
     HWND retainRawExposures{};
     HWND retainHdrMasks{};
     HWND log{};
@@ -406,6 +408,7 @@ std::wstring build_scan_command() {
         << L" --iso " << quote(get_text(g_app.iso))
         << L" --focus-diopters " << quote(get_text(g_app.focus))
         << L" --angles " << quote(get_text(g_app.angles))
+        << L" --measurement-channel " << quote(get_text(g_app.measurementChannel))
         << L" --analysis-mode "
         << quote(SendMessageW(g_app.bidirectionalAnalysis, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"bidirectional" : L"single")
         << L" --angle-advance-file " << quote(g_app.angleAdvanceFile)
@@ -609,6 +612,8 @@ void build_ui(HWND hwnd) {
     g_app.hdrEnable = make_checkbox(hwnd, IDC_HDR_ENABLE, L"Enable HDR", margin, y, 110, 24, false);
     make_label(hwnd, L"HDR brackets", 130, y + 4, 100, 22);
     g_app.hdrBrackets = make_edit(hwnd, IDC_HDR_BRACKETS, L"short:3000:100,mid:10000:100,long:30000:100", 230, y, 500, 24);
+    make_label(hwnd, L"Channel", 745, y + 4, 60, 22);
+    g_app.measurementChannel = make_edit(hwnd, IDC_MEASUREMENT_CHANNEL, L"blue", 805, y, 90, 24);
 
     y += 34;
     g_app.retainRawExposures = make_checkbox(hwnd, IDC_RETAIN_RAW_EXPOSURES, L"Keep exposure originals", margin, y, 180, 24, false);
