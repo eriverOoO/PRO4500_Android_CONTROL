@@ -204,6 +204,7 @@ class MainActivity : ComponentActivity() {
     private var manualSupport = ManualSupport()
     private var autoFocusEnabled = true
     private var operatorLockedFocusDiopters: Float? = null
+    private var startupAutofocusStarted = false
     @Volatile private var lastLensFocusDiopters: Float? = null
     @Volatile private var lastAfState: Int? = null
     private var suppressFocusSwitchCallbacks = false
@@ -695,6 +696,34 @@ class MainActivity : ComponentActivity() {
             autoFocusEnabled -> updateFocusStatus("AUTO ON (adjust focus, then switch OFF before capture)")
             else -> updateFocusStatus("AF lock requested")
         }
+        runStartupAutofocusOnce()
+    }
+
+    private fun runStartupAutofocusOnce() {
+        if (startupAutofocusStarted || settings.manualFocus) return
+        startupAutofocusStarted = true
+        updateFocusStatus("STARTUP AUTOFOCUS...")
+        previewView.postDelayed(
+            {
+                appendLog("Running the one automatic autofocus allowed at app startup")
+                lockFocusForOperator(
+                    previewView.width / 2.0f,
+                    previewView.height / 2.0f,
+                    "Startup AF",
+                    onLocked = {
+                        autoFocusEnabled = false
+                        setAutoFocusSwitchChecked(false)
+                        updateFocusStatus(
+                            operatorLockedFocusDiopters?.let {
+                                "LOCKED after startup AF: ${"%.3f".format(Locale.US, it)} D"
+                            } ?: "LOCKED after startup AF",
+                        )
+                        appendLog("Startup AF complete; AF is now OFF and remains user-controlled")
+                    },
+                )
+            },
+            500L,
+        )
     }
 
     private fun autofocusCenter() {
@@ -1041,13 +1070,9 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        autoFocusEnabled = false
-        setAutoFocusSwitchChecked(false)
-        updateFocusStatus("AF OFF requested; locking before capture...")
-        appendLog("AF was still ON at capture start; freezing the current focus and switching it OFF")
-        freezeCurrentFocusForOperator(
-            "Capture safety lock",
-            onLocked = { captureStill(command) },
+        sendCaptureError(
+            command,
+            "Auto focus is ON. Switch Auto focus OFF to lock focus before capture.",
         )
     }
 
