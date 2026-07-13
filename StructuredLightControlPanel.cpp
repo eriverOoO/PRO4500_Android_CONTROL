@@ -48,6 +48,8 @@ enum ControlId {
     IDC_BIDIRECTIONAL_ANALYSIS,
     IDC_HDR_ENABLE,
     IDC_HDR_BRACKETS,
+    IDC_RETAIN_RAW_EXPOSURES,
+    IDC_RETAIN_HDR_MASKS,
     IDC_LOG,
     IDC_START,
     IDC_STOP,
@@ -86,6 +88,8 @@ struct AppState {
     HWND bidirectionalAnalysis{};
     HWND hdrEnable{};
     HWND hdrBrackets{};
+    HWND retainRawExposures{};
+    HWND retainHdrMasks{};
     HWND log{};
     HWND start{};
     HWND stop{};
@@ -415,6 +419,8 @@ std::wstring build_scan_command() {
         std::wstring brackets = get_text(g_app.hdrBrackets);
         if (!brackets.empty()) cmd << L" --hdr-brackets " << quote(brackets);
     }
+    if (SendMessageW(g_app.retainRawExposures, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --retain-raw-exposures";
+    if (SendMessageW(g_app.retainHdrMasks, BM_GETCHECK, 0, 0) == BST_CHECKED) cmd << L" --retain-hdr-masks";
     return cmd.str();
 }
 
@@ -605,6 +611,10 @@ void build_ui(HWND hwnd) {
     g_app.hdrBrackets = make_edit(hwnd, IDC_HDR_BRACKETS, L"short:3000:100,mid:10000:100,long:30000:100", 230, y, 500, 24);
 
     y += 34;
+    g_app.retainRawExposures = make_checkbox(hwnd, IDC_RETAIN_RAW_EXPOSURES, L"Keep exposure originals", margin, y, 180, 24, false);
+    g_app.retainHdrMasks = make_checkbox(hwnd, IDC_RETAIN_HDR_MASKS, L"Keep HDR masks", 210, y, 140, 24, false);
+
+    y += 34;
     g_app.manual = make_checkbox(hwnd, IDC_MANUAL, L"Manual camera mode", margin, y, 160, 24, true);
     g_app.windowed = make_checkbox(hwnd, IDC_WINDOWED, L"Windowed projection", 190, y, 170, 24, false);
     g_app.stretch = make_checkbox(hwnd, IDC_STRETCH, L"Stretch patterns", 385, y, 140, 24, false);
@@ -747,7 +757,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     HWND hwnd = CreateWindowExW(
         0, kAppClass, L"Structured Light Scan Controller",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 980, 720,
+        CW_USEDEFAULT, CW_USEDEFAULT, 980, 790,
         nullptr, nullptr, instance, nullptr);
 
     if (!hwnd) return 1;

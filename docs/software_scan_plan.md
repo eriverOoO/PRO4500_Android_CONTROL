@@ -122,7 +122,7 @@ captures/<scan_id>/angle_000/
   scan_log.csv
 ```
 
-단일 노출일 때도 원본은 `exposures/pattern_XXX/single.png`로 저장되고, 디코더 입력용 최종 이미지는 `pattern_XXX.png`로 저장됩니다.
+디코더 입력용 최종 이미지는 항상 `pattern_XXX.png`로 저장됩니다. `exposures/` 원본과 `hdr_masks/` 진단 마스크는 기본적으로 병합 직후 제거됩니다. 재병합이나 노출 품질 점검이 필요할 때만 GUI의 `Keep exposure originals`, `Keep HDR masks`를 선택합니다.
 
 ## 4단계: 0도/180도 촬영
 

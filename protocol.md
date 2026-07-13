@@ -41,8 +41,10 @@ The default scan uses 22 projected patterns per angle:
 
 The default angle list is `0,180`, so a normal single-exposure scan captures
 and saves 22 decoder frames for `angle_000` and 22 decoder frames for
-`angle_180`. HDR is optional; when enabled, raw bracket frames are saved under
-`exposures/` and merged back to the same 22 decoder frames per angle.
+`angle_180`. HDR is optional; when enabled, raw bracket frames are temporarily
+stored under `exposures/` and merged back to the same 22 decoder frames per angle.
+They are retained only with `--retain-raw-exposures`; HDR masks likewise require
+`--retain-hdr-masks`.
 
 ## PC to Android
 
@@ -166,9 +168,9 @@ Fields:
 During the synchronized PC workflow, uploads are saved into the decoder folder:
 
 ```text
-captures/<scan_id>/angle_000/exposures/pattern_000/single.png
+captures/<scan_id>/angle_000/exposures/pattern_000/single.png  # retained only when requested
 captures/<scan_id>/angle_000/pattern_000.png
-captures/<scan_id>/angle_180/exposures/pattern_000/single.png
+captures/<scan_id>/angle_180/exposures/pattern_000/single.png  # retained only when requested
 captures/<scan_id>/angle_180/pattern_000.png
 ```
 

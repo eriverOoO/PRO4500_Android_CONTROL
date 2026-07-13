@@ -936,6 +936,7 @@ def merge_hdr_pattern(
     pattern: PatternSpec,
     bracket_records: list[dict[str, Any]],
     hdr_settings: HdrSettings,
+    retain_hdr_masks: bool,
 ) -> dict[str, Any]:
     if not bracket_records:
         raise RuntimeError(f"No bracket frames for pattern {pattern.pattern_id:03d}")
@@ -980,12 +981,17 @@ def merge_hdr_pattern(
     final_image = np.rint(normalized * max_value).astype(dtype)
 
     final_path = decode_dir / f"pattern_{pattern.pattern_id:03d}.png"
-    mask_dir = decode_dir / "hdr_masks"
-    saturated_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_saturated.png"
-    dark_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_dark.png"
     write_image(final_path, final_image)
-    write_image(saturated_path, saturated_mask.astype(np.uint8) * 255)
-    write_image(dark_path, dark_mask.astype(np.uint8) * 255)
+    saturated_mask_path: str | None = None
+    dark_mask_path: str | None = None
+    if retain_hdr_masks:
+        mask_dir = decode_dir / "hdr_masks"
+        saturated_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_saturated.png"
+        dark_path = mask_dir / f"pattern_{pattern.pattern_id:03d}_dark.png"
+        write_image(saturated_path, saturated_mask.astype(np.uint8) * 255)
+        write_image(dark_path, dark_mask.astype(np.uint8) * 255)
+        saturated_mask_path = rel_posix(saturated_path, decode_dir)
+        dark_mask_path = rel_posix(dark_path, decode_dir)
 
     ordered_brackets = [
         ExposureBracket(
@@ -1012,8 +1018,9 @@ def merge_hdr_pattern(
             "dark_threshold": hdr_settings.dark_threshold,
             "reference_exposure_product": reference_eff,
             "selected_pixel_counts": selected_counts(selected_index, ordered_brackets),
-            "saturated_mask": rel_posix(saturated_path, decode_dir),
-            "dark_mask": rel_posix(dark_path, decode_dir),
+            "saturated_mask": saturated_mask_path,
+            "dark_mask": dark_mask_path,
+            "masks_retained": retain_hdr_masks,
         },
         "captures": [
             {
@@ -1037,6 +1044,26 @@ def merge_hdr_pattern(
             for record in records
         ],
     }
+
+
+def remove_bracket_frames(bracket_records: list[dict[str, Any]]) -> None:
+    """Remove temporary upload frames after their merged decoder image is written."""
+    directories: set[Path] = set()
+    for record in bracket_records:
+        path = Path(str(record["path"]))
+        try:
+            path.unlink()
+            directories.add(path.parent)
+        except FileNotFoundError:
+            continue
+
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        try:
+            directory.rmdir()
+            if directory.parent.name == "exposures":
+                directory.parent.rmdir()
+        except OSError:
+            pass
 
 
 def write_decode_logs(
@@ -1243,12 +1270,15 @@ async def run_scan(args: argparse.Namespace) -> int:
             pattern=pattern,
             bracket_records=bracket_records,
             hdr_settings=hdr_settings,
+            retain_hdr_masks=args.retain_hdr_masks,
         )
         add_decode_record(decode_dir, record)
         print(
             f"[hdr] merged pattern={pattern.pattern_id:03d} "
             f"label={pattern.label} -> {decode_dir / record['filename']}"
         )
+        if not args.retain_raw_exposures:
+            remove_bracket_frames(bracket_records)
 
     try:
         if args.dry_run:
@@ -1607,6 +1637,8 @@ async def run_scan(args: argparse.Namespace) -> int:
                     }
                     for bracket in hdr_settings.brackets
                 ],
+                "raw_exposures_retained": args.retain_raw_exposures,
+                "masks_retained": args.retain_hdr_masks,
             },
             "decoder_contract": [
                 {
@@ -1724,6 +1756,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--saturated-threshold", default=250, type=int)
     parser.add_argument("--dark-threshold", default=5, type=int)
     parser.add_argument("--hdr-bit-depth", default=8, type=int, choices=(8, 16))
+    parser.add_argument(
+        "--retain-raw-exposures",
+        action="store_true",
+        help="Keep exposures/pattern_### source frames after each merged image is written.",
+    )
+    parser.add_argument(
+        "--retain-hdr-masks",
+        action="store_true",
+        help="Keep hdr_masks saturation/dark diagnostics after HDR merging.",
+    )
     parser.add_argument(
         "--legacy-single-exposure",
         action="store_true",

@@ -251,12 +251,12 @@ captures/
     pattern_001.png
     ...
     pattern_021.png
-    exposures/
+    exposures/                  # optional: Keep exposure originals
       pattern_000/
         short.png
         mid.png
         long.png
-    hdr_masks/
+    hdr_masks/                  # optional: Keep HDR masks
       pattern_000_saturated.png
       pattern_000_dark.png
     scan_log.json
